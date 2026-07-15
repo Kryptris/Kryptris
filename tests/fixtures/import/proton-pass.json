@@ -1,0 +1,44 @@
+{
+  "version": "1.0.0",
+  "userId": "fixture-user",
+  "vaults": {
+    "vault-work": {
+      "name": "Arbeit",
+      "description": "Hersteller-Fixture",
+      "items": [
+        {
+          "itemId": "item-login",
+          "shareId": "vault-work",
+          "state": 1,
+          "data": {
+            "metadata": {
+              "name": "Proton Portal",
+              "note": "Aus Proton Pass exportiert",
+              "itemUuid": "00000000-0000-4000-8000-000000000002"
+            },
+            "content": {
+              "itemType": "login",
+              "itemEmail": "",
+              "itemUsername": "proton-user",
+              "itemPassword": "proton-secret",
+              "urls": ["https://proton.example"],
+              "totpUri": ""
+            },
+            "extraFields": [
+              {
+                "fieldName": "Mandant",
+                "type": "text",
+                "data": "Nord"
+              },
+              {
+                "fieldName": "Support-PIN",
+                "type": "hidden",
+                "data": "1234"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "format": "vaulta-profile",
+  "version": 1,
+  "profileId": "11111111-1111-4111-8111-111111111111",
+  "createdAt": "2026-07-14T00:00:00.000Z",
+  "updatedAt": "2026-07-14T00:00:00.000Z",
+  "access": {
+    "kdf": {
+      "salt": "AAAAAAAAAAAAAAAAAAAAAA==",
+      "parameters": {
+        "algorithm": "argon2id",
+        "memorySizeKiB": 262144,
+        "iterations": 3,
+        "parallelism": 1,
+        "hashLength": 32
+      }
+    },
+    "passwordVerifier": {
+      "algorithm": "AES-256-GCM",
+      "nonce": "AAAAAAAAAAAAAAAA",
+      "ciphertext": "fixture",
+      "tag": "fixture"
+    },
+    "wrappedMasterGateKey": {
+      "algorithm": "AES-256-GCM",
+      "nonce": "AAAAAAAAAAAAAAAA",
+      "ciphertext": "fixture",
+      "tag": "fixture"
+    },
+    "masterOnlyProfileWrap": null,
+    "additionalKeyWraps": []
+  },
+  "recovery": null,
+  "protectedMetadata": {
+    "algorithm": "AES-256-GCM",
+    "nonce": "AAAAAAAAAAAAAAAA",
+    "ciphertext": "fixture",
+    "tag": "fixture"
+  },
+  "publicFactorData": {
+    "payload": "fixture",
+    "mac": "fixture"
+  }
+}

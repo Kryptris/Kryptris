@@ -1,0 +1,15 @@
+{
+  "header": {
+    "magic": "VAULTA-CONTAINER",
+    "version": 1,
+    "kind": "vault",
+    "cipher": "AES-256-GCM",
+    "contextHash": "fixture"
+  },
+  "payload": {
+    "algorithm": "AES-256-GCM",
+    "nonce": "fixture",
+    "ciphertext": "fixture",
+    "tag": "fixture"
+  }
+}

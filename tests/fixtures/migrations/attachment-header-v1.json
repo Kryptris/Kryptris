@@ -1,0 +1,13 @@
+{
+  "format": "vaulta-attachment",
+  "version": 1,
+  "cipher": "AES-256-GCM-CHUNKED",
+  "chunkSize": 4096,
+  "noncePrefix": "AAAAAAAAAAA=",
+  "wrappedFileKey": {
+    "algorithm": "AES-256-GCM",
+    "nonce": "fixture",
+    "ciphertext": "fixture",
+    "tag": "fixture"
+  }
+}

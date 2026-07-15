@@ -1,0 +1,9 @@
+dist
+release
+coverage
+node_modules
+.npm-cache
+.corepack
+docs/assets
+build/*.svg
+pnpm-lock.yaml

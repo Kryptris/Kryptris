@@ -1,0 +1,44 @@
+{
+  "encrypted": false,
+  "folders": [
+    {
+      "id": "folder-work",
+      "name": "Arbeit"
+    }
+  ],
+  "items": [
+    {
+      "id": "item-login",
+      "organizationId": null,
+      "folderId": "folder-work",
+      "type": 1,
+      "reprompt": 0,
+      "name": "Bitwarden Portal",
+      "notes": "Aus Bitwarden exportiert",
+      "favorite": true,
+      "fields": [
+        {
+          "name": "Kundennummer",
+          "value": "4711",
+          "type": 0
+        },
+        {
+          "name": "Support-PIN",
+          "value": "0815",
+          "type": 1
+        }
+      ],
+      "login": {
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://bitwarden.example"
+          }
+        ],
+        "username": "bw-user",
+        "password": "bw-secret",
+        "totp": "otpauth://totp/Example:bw-user?secret=JBSWY3DPEHPK3PXP&issuer=Example"
+      }
+    }
+  ]
+}

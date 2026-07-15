@@ -1,0 +1,134 @@
+{
+  "name": "vaulta",
+  "version": "1.0.0",
+  "description": "Lokaler, vollständig offline nutzbarer Passwort-Manager für Windows",
+  "main": "dist/main/main/index.js",
+  "type": "commonjs",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Vaulta",
+  "packageManager": "pnpm@11.13.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n main,preload,renderer,electron -c cyan,blue,magenta,green \"tsc -p tsconfig.main-build.json --watch --preserveWatchOutput\" \"vite build --config vite.preload.config.ts --watch\" \"vite --host 127.0.0.1\" \"wait-on tcp:127.0.0.1:5173 dist/main/main/index.js dist/main/preload/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.main-build.json && vite build --config vite.preload.config.ts && node scripts/check-preload-bundle.mjs && vite build",
+    "clean": "node scripts/clean.mjs",
+    "start": "electron .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "npm run build && cross-env VAULTA_E2E_MODE=workspace playwright test",
+    "package": "npm run build && electron-builder --dir",
+    "make": "node scripts/clean-release.mjs && npm run build && electron-builder --win --publish never",
+    "audit:prod": "pnpm audit --prod --audit-level high",
+    "licenses:prod": "node scripts/check-licenses.mjs",
+    "security:scan-artifacts": "node scripts/scan-artifacts.mjs",
+    "security:check-preload": "node scripts/check-preload-bundle.mjs",
+    "security:check-fuses": "node scripts/check-fuses.cjs release/win-unpacked/Vaulta.exe release/win-arm64-unpacked/Vaulta.exe",
+    "verify": "prettier --check . && eslint . --max-warnings 0 && npm run typecheck && vitest run",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "13.3.0",
+    "@simplewebauthn/server": "13.3.2",
+    "@zxcvbn-ts/core": "4.1.2",
+    "@zxcvbn-ts/language-common": "4.1.2",
+    "@zxcvbn-ts/language-de": "4.1.1",
+    "hash-wasm": "4.12.0",
+    "jsqr": "1.4.0",
+    "lucide-react": "1.24.0",
+    "otpauth": "9.5.1",
+    "papaparse": "5.5.4",
+    "qrcode": "1.5.4",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "react-markdown": "10.1.0",
+    "yauzl": "3.4.0",
+    "yazl": "3.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@electron/fuses": "2.1.3",
+    "@eslint/js": "9.39.2",
+    "@playwright/test": "1.61.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@types/node": "26.1.1",
+    "@types/papaparse": "5.5.2",
+    "@types/qrcode": "1.5.6",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@types/yauzl": "3.4.0",
+    "@types/yazl": "3.3.1",
+    "@vitejs/plugin-react": "6.0.3",
+    "concurrently": "9.2.1",
+    "cross-env": "10.1.0",
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3",
+    "eslint": "9.39.2",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "eslint-plugin-react-refresh": "0.5.2",
+    "fast-check": "4.9.0",
+    "globals": "17.3.0",
+    "jsdom": "29.1.1",
+    "pnpm": "11.13.0",
+    "prettier": "3.9.5",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.63.0",
+    "vite": "8.1.4",
+    "vitest": "4.1.10",
+    "wait-on": "9.0.4"
+  },
+  "build": {
+    "appId": "de.vaulta.desktop",
+    "productName": "Vaulta",
+    "publish": null,
+    "artifactName": "Vaulta-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": true,
+    "afterPack": "scripts/after-pack.cjs",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "signExecutable": false
+    },
+    "nsis": {
+      "artifactName": "Vaulta-${version}-Setup.${ext}",
+      "differentialPackage": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Vaulta"
+    }
+  }
+}

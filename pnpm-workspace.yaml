@@ -1,0 +1,5 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+minimumReleaseAgeExclude:
+  - pnpm@11.13.0

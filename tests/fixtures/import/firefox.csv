@@ -1,0 +1,2 @@
+url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged
+https://firefox.example,firefox-user,firefox-secret,,https://firefox.example,00000000-0000-4000-8000-000000000001,1710000000000,1710000001000,1710000002000

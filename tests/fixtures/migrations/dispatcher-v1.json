@@ -1,0 +1,10 @@
+{
+  "format": "vaulta-migration-test-fixture",
+  "version": 1,
+  "records": [
+    {
+      "id": "record-1",
+      "value": "unverändert"
+    }
+  ]
+}

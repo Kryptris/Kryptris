@@ -395,7 +395,7 @@ describe('Vaulta Renderer', () => {
 
     const password = await screen.findByLabelText('Master-Passwort');
     fireEvent.change(password, { target: { value: 'sehr-langes-master-passwort' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Vaulta entsperren' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Kryptris entsperren' }));
 
     await waitFor(() =>
       expect(api.auth.unlock).toHaveBeenCalledWith({

@@ -14,7 +14,9 @@ let rendererServer: RendererServer | null = null;
 let allowedOrigin = '';
 let closingWindow = false;
 
-app.setName('Vaulta');
+app.setName('Kryptris');
+// Bestehende Vaulta-Installationen behalten ihren Datenordner nach der Umbenennung.
+app.setPath('userData', path.join(app.getPath('appData'), 'Vaulta'));
 app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-component-update');
@@ -148,7 +150,7 @@ async function createWindow(): Promise<void> {
     show: false,
     frame: false,
     backgroundColor: '#080d18',
-    title: 'Vaulta',
+    title: 'Kryptris',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.resolve(__dirname, '../preload/index.js'),
@@ -218,16 +220,16 @@ if (ownsInstance) {
   app
     .whenReady()
     .then(async () => {
-      app.setAppUserModelId('de.vaulta.desktop');
+      app.setAppUserModelId('de.kryptris.desktop');
       Menu.setApplicationMenu(null);
-      session.defaultSession.setUserAgent('Vaulta Desktop');
+      session.defaultSession.setUserAgent('Kryptris Desktop');
       powerMonitor.on('lock-screen', () => controller?.onSystemLock());
       powerMonitor.on('suspend', () => controller?.onSystemSuspend());
       await createWindow();
     })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : 'Unbekannter Startfehler';
-      dialog.showErrorBox('Vaulta konnte nicht gestartet werden', message);
+      dialog.showErrorBox('Kryptris konnte nicht gestartet werden', message);
       app.exit(1);
     });
 

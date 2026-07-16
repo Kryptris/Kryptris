@@ -370,6 +370,7 @@ export class VaultaController {
     this.clipboard.dispose();
     this.factors.clearPending();
     this.importer.clear();
+    this.vaults.clearCachedDocuments?.();
     this.profile.lock();
     if (this.backupTimer !== null) clearInterval(this.backupTimer);
     this.backupTimer = null;
@@ -422,6 +423,7 @@ export class VaultaController {
     this.importer.clear();
     this.importVaults.clear();
     this.pendingVaultNames.clear();
+    this.vaults.clearCachedDocuments?.();
     this.profile.lock();
     this.activeVaultId = null;
     this.configureAutomaticBackups();

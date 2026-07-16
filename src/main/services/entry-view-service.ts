@@ -308,10 +308,12 @@ function highestSeverity(findings: SecurityFinding[]): SecuritySeverity {
 }
 
 export class EntryViewService {
+  private readonly securityReports = new Map<string, SecurityFinding[]>();
+
   public constructor(private readonly security = new SecurityCheckService()) {}
 
   public list(entries: readonly VaultEntry[], query: EntryListQuery): EntrySummary[] {
-    const report = this.security.scan(entries.filter((entry) => entry.deletedAt === null));
+    const report = this.securityReportFor(entries);
     const findingsByEntry = new Map<string, SecurityFinding[]>();
     for (const finding of report.findings) {
       const existing = findingsByEntry.get(finding.entryId) ?? [];
@@ -352,6 +354,21 @@ export class EntryViewService {
         updatedAt: entry.updatedAt,
         deletedAt: entry.deletedAt,
       }));
+  }
+
+  private securityReportFor(entries: readonly VaultEntry[]): { findings: SecurityFinding[] } {
+    const activeEntries = entries.filter((entry) => entry.deletedAt === null);
+    const revision = activeEntries
+      .map((entry) => `${entry.id}:${entry.updatedAt}:${entry.secretChangedAt}`)
+      .sort()
+      .join('|');
+    const cached = this.securityReports.get(revision);
+    if (cached !== undefined) return { findings: cached };
+
+    const findings = this.security.scan(activeEntries).findings;
+    this.securityReports.clear();
+    this.securityReports.set(revision, findings);
+    return { findings };
   }
 
   public detail(entry: VaultEntry): EntryDetail {

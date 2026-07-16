@@ -166,7 +166,7 @@ export function ImportView({
               ))}
             </div>
             <InlineNotice kind="warning" title="Quelldatei bleibt erhalten">
-              Vaulta löscht Importdateien niemals automatisch. Behandle unverschlüsselte Exporte
+              Kryptris löscht Importdateien niemals automatisch. Behandle unverschlüsselte Exporte
               anschließend sicher.
             </InlineNotice>
             <Button
@@ -407,7 +407,7 @@ export function ExportView({ state, notify }: { state: AppState; notify: Notify 
           <div>
             <p className="eyebrow">Bewusster Datentransfer</p>
             <h1 id="export-title">Daten exportieren</h1>
-            <p>Das verschlüsselte Vaulta-Format ist immer die sicherste Wahl.</p>
+            <p>Das verschlüsselte Kryptris-Format ist immer die sicherste Wahl.</p>
           </div>
         </div>
       </header>
@@ -423,7 +423,7 @@ export function ExportView({ state, notify }: { state: AppState; notify: Notify 
             <FormatOption
               value="vaulta-backup"
               selected={format}
-              title="Vaulta-Backup"
+              title="Kryptris-Backup"
               description="Verschlüsselt, vollständig und mit Integritätsprüfung"
               icon={<LockKeyhole />}
               onSelect={setFormat}

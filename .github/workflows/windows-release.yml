@@ -47,9 +47,9 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $installer = (Resolve-Path "release/Vaulta-$version-Setup.exe").Path
+          $installer = (Resolve-Path "release/Kryptris-$version-Setup.exe").Path
           $installRoot = Join-Path $env:RUNNER_TEMP 'vaulta-nsis'
-          $installDir = Join-Path $installRoot 'Vaulta'
+          $installDir = Join-Path $installRoot 'Kryptris'
           $appData = Join-Path $env:RUNNER_TEMP 'vaulta-nsis-appdata'
           $e2eCopy = Join-Path $env:RUNNER_TEMP 'vaulta-installed-e2e-copy'
           if ($installDir -match '\s') {
@@ -67,16 +67,16 @@ jobs:
           if ($process.ExitCode -ne 0) {
             throw "Der NSIS-Installer wurde mit Exitcode $($process.ExitCode) beendet."
           }
-          $installedExe = Join-Path $installDir 'Vaulta.exe'
-          $uninstaller = Join-Path $installDir 'Uninstall Vaulta.exe'
+          $installedExe = Join-Path $installDir 'Kryptris.exe'
+          $uninstaller = Join-Path $installDir 'Uninstall Kryptris.exe'
           if (!(Test-Path -LiteralPath $installedExe -PathType Leaf) -or !(Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
-            throw 'Die erwartete installierte Vaulta-EXE oder der Uninstaller fehlt.'
+            throw 'Die erwartete installierte Kryptris-EXE oder der Uninstaller fehlt.'
           }
           node scripts/check-fuses.cjs $installedExe
           node scripts/scan-artifacts.mjs $installDir
           Copy-Item -Path (Join-Path $installDir '*') -Destination $e2eCopy -Recurse -Force
           New-Item -ItemType File -Path (Join-Path $e2eCopy '.vaulta-e2e-copy') -Force | Out-Null
-          $e2eExecutable = Join-Path $e2eCopy 'Vaulta.exe'
+          $e2eExecutable = Join-Path $e2eCopy 'Kryptris.exe'
           node scripts/enable-e2e-inspect.cjs $e2eExecutable
           "VAULTA_E2E_EXECUTABLE=$e2eExecutable" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Installiertes x64-Paket offline durchtesten
@@ -89,7 +89,7 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:VAULTA_E2E_INSTALL_DIR)) { exit 0 }
-          $uninstaller = Join-Path $env:VAULTA_E2E_INSTALL_DIR 'Uninstall Vaulta.exe'
+          $uninstaller = Join-Path $env:VAULTA_E2E_INSTALL_DIR 'Uninstall Kryptris.exe'
           if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
             $env:APPDATA = $env:VAULTA_E2E_APPDATA
             $process = Start-Process -FilePath $uninstaller -ArgumentList @('/currentuser', '/S') -Wait -PassThru
@@ -112,9 +112,9 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $expected = @(
-            "Vaulta-$version-Setup.exe",
-            "Vaulta-$version-x64.zip",
-            "Vaulta-$version-arm64.zip"
+            "Kryptris-$version-Setup.exe",
+            "Kryptris-$version-x64.zip",
+            "Kryptris-$version-arm64.zip"
           )
           $actual = @(Get-ChildItem -Path release -File | Where-Object { $_.Extension -in '.exe', '.zip' } | Select-Object -ExpandProperty Name | Sort-Object)
           $difference = @(Compare-Object -ReferenceObject ($expected | Sort-Object) -DifferenceObject $actual)
@@ -152,7 +152,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           cd release
-          expected=("Vaulta-$version-Setup.exe" "Vaulta-$version-x64.zip" "Vaulta-$version-arm64.zip" "SHA256SUMS.txt")
+          expected=("Kryptris-$version-Setup.exe" "Kryptris-$version-x64.zip" "Kryptris-$version-arm64.zip" "SHA256SUMS.txt")
           for artifact in "${expected[@]}"; do
             test -f "$artifact" || { echo "Fehlendes Release-Artefakt: $artifact" >&2; exit 1; }
           done
@@ -167,8 +167,8 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
-            "release/Vaulta-$version-Setup.exe" \
-            "release/Vaulta-$version-x64.zip" \
-            "release/Vaulta-$version-arm64.zip" \
+            "release/Kryptris-$version-Setup.exe" \
+            "release/Kryptris-$version-x64.zip" \
+            "release/Kryptris-$version-arm64.zip" \
             release/SHA256SUMS.txt \
             --verify-tag --generate-notes

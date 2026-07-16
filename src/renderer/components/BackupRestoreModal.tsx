@@ -78,7 +78,7 @@ export function BackupRestoreModal({
       title="Verschlüsseltes Backup wiederherstellen"
       description={
         freshProfile
-          ? 'Stelle auf diesem frischen System ein vollständiges Vaulta-Profil aus einer .vaulta-backup-Datei wieder her.'
+          ? 'Stelle auf diesem frischen System ein vollständiges Kryptris-Profil aus einer .vaulta-backup-Datei wieder her.'
           : 'Wähle eine .vaulta-backup-Datei. Version und Integrität werden vollständig geprüft, bevor Daten ersetzt werden.'
       }
       onClose={close}

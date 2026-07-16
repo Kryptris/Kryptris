@@ -104,6 +104,13 @@ export class VaultService {
   private readonly now: () => Date;
   private readonly registryWrites = new SerialExecutor();
   private readonly vaultWrites = new Map<string, SerialExecutor>();
+  /**
+   * Decrypted documents are retained only while the controller keeps the vault unlocked.
+   * This avoids re-reading and decrypting an entire vault for every list, folder, and detail IPC call.
+   */
+  private readonly documentCache = new Map<string, VaultDocument>();
+  private readonly pendingReads = new Map<string, Promise<VaultDocument>>();
+  private cacheGeneration = 0;
 
   public constructor(options: VaultServiceOptions) {
     this.vaultsDir = path.resolve(options.rootDir, 'vaults');
@@ -211,12 +218,39 @@ export class VaultService {
         this.crypto.erase(seed);
         this.crypto.erase(key);
       }
+      this.documentCache.set(id, structuredClone(document));
       return document;
     });
   }
 
   public async readVault(vaultId: string): Promise<VaultDocument> {
     assertSafeIdentifier(vaultId, 'Tresor-ID');
+    const cached = this.documentCache.get(vaultId);
+    if (cached !== undefined) return structuredClone(cached);
+
+    const pending = this.pendingReads.get(vaultId);
+    if (pending !== undefined) return structuredClone(await pending);
+
+    const generation = this.cacheGeneration;
+    const read = this.readVaultFromStorage(vaultId);
+    this.pendingReads.set(vaultId, read);
+    try {
+      const document = await read;
+      if (generation === this.cacheGeneration) this.documentCache.set(vaultId, document);
+      return structuredClone(document);
+    } finally {
+      if (this.pendingReads.get(vaultId) === read) this.pendingReads.delete(vaultId);
+    }
+  }
+
+  /** Clears all decrypted documents when the application locks or is disposed. */
+  public clearCachedDocuments(): void {
+    this.cacheGeneration += 1;
+    this.documentCache.clear();
+    this.pendingReads.clear();
+  }
+
+  private async readVaultFromStorage(vaultId: string): Promise<VaultDocument> {
     const key = await this.getVaultKey(vaultId);
     try {
       await this.atomicWriter.recoverPreviousIfTargetMissing(this.vaultPath(vaultId));
@@ -271,6 +305,7 @@ export class VaultService {
       const key = await this.getVaultKey(document.id);
       try {
         await this.writeVaultWithKey(replacement, key);
+        this.documentCache.set(document.id, structuredClone(replacement));
       } finally {
         this.crypto.erase(key);
       }
@@ -287,6 +322,8 @@ export class VaultService {
       delete registry[vaultId];
       await this.writeKeyRegistry(registry);
       await rm(this.vaultPath(vaultId), { force: true });
+      this.documentCache.delete(vaultId);
+      this.pendingReads.delete(vaultId);
     });
   }
 
@@ -384,6 +421,7 @@ export class VaultService {
       const key = await this.getVaultKey(vaultId);
       try {
         await this.writeVaultWithKey(document, key);
+        this.documentCache.set(vaultId, structuredClone(document));
       } finally {
         this.crypto.erase(key);
       }

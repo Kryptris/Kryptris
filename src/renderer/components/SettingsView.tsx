@@ -429,8 +429,8 @@ function SecuritySettings({
       </Field>
       {draft.autoLockSeconds === 0 && (
         <InlineNotice kind="info">
-          „Sofort“ sperrt Vaulta, sobald die App verlassen oder minimiert wird. Während du aktiv in
-          Vaulta arbeitest, bleibt der Tresor geöffnet.
+          „Sofort“ sperrt Kryptris, sobald die App verlassen oder minimiert wird. Während du aktiv in
+          Kryptris arbeitest, bleibt der Tresor geöffnet.
         </InlineNotice>
       )}
       <div className="settings-toggle-list">
@@ -480,7 +480,7 @@ function ClipboardSettings({ draft, setDraft }: DraftProps) {
         <div>
           <h2>Zwischenablage & Sichtschutz</h2>
           <p>
-            Vaulta löscht nur Inhalte, die es selbst gesetzt hat und die noch unverändert vorliegen.
+            Kryptris löscht nur Inhalte, die es selbst gesetzt hat und die noch unverändert vorliegen.
           </p>
         </div>
       </header>
@@ -990,7 +990,7 @@ function SecurityKeySetup({
     <Modal
       open={open}
       title="Sicherheitsschlüssel registrieren"
-      description="Vaulta versucht den hardwaregebundenen PRF-/hmac-secret-Modus zu verwenden."
+      description="Kryptris versucht den hardwaregebundenen PRF-/hmac-secret-Modus zu verwenden."
       onClose={onClose}
     >
       <form className="stack" onSubmit={(event) => void register(event)}>

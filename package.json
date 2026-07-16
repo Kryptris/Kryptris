@@ -1,12 +1,12 @@
 {
-  "name": "vaulta",
+  "name": "kryptris",
   "version": "1.0.0",
   "description": "Lokaler, vollständig offline nutzbarer Passwort-Manager für Windows",
   "main": "dist/main/main/index.js",
   "type": "commonjs",
   "private": true,
   "license": "UNLICENSED",
-  "author": "Vaulta",
+  "author": "Kryptris",
   "packageManager": "pnpm@11.13.0",
   "engines": {
     "node": ">=24.0.0"
@@ -30,7 +30,7 @@
     "licenses:prod": "node scripts/check-licenses.mjs",
     "security:scan-artifacts": "node scripts/scan-artifacts.mjs",
     "security:check-preload": "node scripts/check-preload-bundle.mjs",
-    "security:check-fuses": "node scripts/check-fuses.cjs release/win-unpacked/Vaulta.exe release/win-arm64-unpacked/Vaulta.exe",
+    "security:check-fuses": "node scripts/check-fuses.cjs release/win-unpacked/Kryptris.exe release/win-arm64-unpacked/Kryptris.exe",
     "verify": "prettier --check . && eslint . --max-warnings 0 && npm run typecheck && vitest run",
     "postinstall": "electron-builder install-app-deps"
   },
@@ -86,10 +86,10 @@
     "wait-on": "9.0.4"
   },
   "build": {
-    "appId": "de.vaulta.desktop",
-    "productName": "Vaulta",
+    "appId": "de.kryptris.desktop",
+    "productName": "Kryptris",
     "publish": null,
-    "artifactName": "Vaulta-${version}-${arch}.${ext}",
+    "artifactName": "Kryptris-${version}-${arch}.${ext}",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -121,14 +121,14 @@
       "signExecutable": false
     },
     "nsis": {
-      "artifactName": "Vaulta-${version}-Setup.${ext}",
+      "artifactName": "Kryptris-${version}-Setup.${ext}",
       "differentialPackage": false,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "deleteAppDataOnUninstall": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Vaulta"
+      "shortcutName": "Kryptris"
     }
   }
 }

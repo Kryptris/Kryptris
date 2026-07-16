@@ -75,12 +75,12 @@ export function IconButton({
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
-    <div className={`brand ${compact ? 'brand--compact' : ''}`} aria-label="Vaulta">
+    <div className={`brand ${compact ? 'brand--compact' : ''}`} aria-label="Kryptris">
       <span className="brand__mark" aria-hidden="true">
         <ShieldCheck />
         <LockKeyhole />
       </span>
-      {!compact && <span className="brand__word">Vaulta</span>}
+      {!compact && <span className="brand__word">Kryptris</span>}
     </div>
   );
 }
@@ -98,7 +98,7 @@ export function WindowControls() {
         <Maximize2 />
       </IconButton>
       <IconButton
-        label="Vaulta schließen"
+        label="Kryptris schließen"
         className="window-controls__close"
         onClick={() => void window.vaulta.window.close()}
       >
@@ -355,7 +355,7 @@ export function InlineNotice({
   );
 }
 
-export function LoadingState({ label = 'Vaulta wird geladen …' }: { label?: string }) {
+export function LoadingState({ label = 'Kryptris wird geladen …' }: { label?: string }) {
   return (
     <div className="loading-state" role="status">
       <LoaderCircle className="spin" aria-hidden="true" />

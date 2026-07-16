@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { EntryListQuery, VaultEntry } from '../../src/shared/models';
 import { EntryViewService } from '../../src/main/services/entry-view-service';
@@ -72,5 +72,27 @@ describe('EntryViewService', () => {
     expect(
       new EntryViewService().list([olderUse, newerUse], query('recent')).map(({ id }) => id),
     ).toEqual(['newer', 'older']);
+  });
+
+  it('berechnet den Sicherheitsstatus bei unveraenderten Eintraegen nur einmal', () => {
+    const scan = vi.fn(() => ({ findings: [] }));
+    const service = new EntryViewService({ scan } as never);
+    const entries = [credentialEntry({ id: 'cached-entry' })];
+
+    service.list(entries, query('all'));
+    service.list(entries, { ...query('favorites'), search: 'cached' });
+
+    expect(scan).toHaveBeenCalledTimes(1);
+  });
+
+  it('aktualisiert den Sicherheitsstatus nach einer Eintragsaenderung', () => {
+    const scan = vi.fn(() => ({ findings: [] }));
+    const service = new EntryViewService({ scan } as never);
+    const entry = credentialEntry({ id: 'changed-entry' }) as VaultEntry;
+
+    service.list([entry], query('all'));
+    service.list([{ ...entry, updatedAt: '2026-07-16T12:00:00.000Z' }], query('all'));
+
+    expect(scan).toHaveBeenCalledTimes(2);
   });
 });

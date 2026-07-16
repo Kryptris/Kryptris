@@ -627,7 +627,7 @@ export function EntryDetailPanel({
       <Modal
         open={privateKeyExportOpen}
         title="Privaten Schlüssel exportieren"
-        description="Die Zieldatei ist nicht mehr durch Vaulta verschlüsselt. Verwahre sie nur so lange wie zwingend nötig."
+        description="Die Zieldatei ist nicht mehr durch Kryptris verschlüsselt. Verwahre sie nur so lange wie zwingend nötig."
         onClose={() => {
           setPrivateKeyExportOpen(false);
           setPrivateKeyPassword('');
@@ -704,7 +704,7 @@ export function EntryDetailPanel({
           <div className="wifi-qr">
             <img src={wifiQrData} alt={`QR-Code für ${detail.title}`} />
             <InlineNotice kind="warning">
-              Schließe diese Ansicht nach dem Scannen. Screenshots können von Vaulta nicht
+              Schließe diese Ansicht nach dem Scannen. Screenshots können von Kryptris nicht
               vollständig verhindert werden.
             </InlineNotice>
           </div>

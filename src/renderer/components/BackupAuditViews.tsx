@@ -176,7 +176,7 @@ export function BackupView({
         </header>
         <InlineNotice kind="warning">
           Erstelle vor dem Wiederherstellen bei Bedarf selbst eine Sicherung des aktuellen Stands.
-          Vaulta übernimmt niemals ein Backup mit ungültiger Version oder Integritätsprüfung.
+          Kryptris übernimmt niemals ein Backup mit ungültiger Version oder Integritätsprüfung.
         </InlineNotice>
       </section>
       <BackupRestoreModal

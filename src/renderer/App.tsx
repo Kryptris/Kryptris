@@ -15,7 +15,7 @@ export function App() {
         <span className="fatal-screen__icon" aria-hidden="true">
           <AlertTriangle />
         </span>
-        <h1>Vaulta konnte nicht gestartet werden</h1>
+        <h1>Kryptris konnte nicht gestartet werden</h1>
         <p>{fatalError}</p>
         <Button icon={<RotateCcw />} variant="primary" onClick={() => window.location.reload()}>
           Erneut versuchen

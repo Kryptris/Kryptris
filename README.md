@@ -1,6 +1,6 @@
-# Vaulta
+# Kryptris
 
-Vaulta ist ein lokaler, deutschsprachiger Passwort-Manager für Windows 10/11. Er arbeitet ohne Konto, Cloud oder externe Dienste und speichert alle fachlichen Daten verschlüsselt im lokalen Benutzerprofil. Das Produkt folgt dem verbindlichen [Konzept](docs/concept.md) und dem visuellen [UI-Prototyp](docs/assets/vaulta-ui-prototype.png).
+Kryptris ist ein lokaler, deutschsprachiger Passwort-Manager für Windows 10/11. Er arbeitet ohne Konto, Cloud oder externe Dienste und speichert alle fachlichen Daten verschlüsselt im lokalen Benutzerprofil. Das Produkt folgt dem verbindlichen [Konzept](docs/concept.md) und dem visuellen [UI-Prototyp](docs/assets/vaulta-ui-prototype.png).
 
 ## Funktionsumfang
 
@@ -22,7 +22,7 @@ Das Master-Passwort wird mit Argon2id (mindestens 256 MiB Arbeitsspeicher im Pro
 
 Der Renderer läuft mit `contextIsolation`, ohne Node-Integration, im Chromium-Sandboxprozess. Seine API besteht aus einer festen, schema-validierten IPC-Allowlist. Datei-, Zwischenablage- und Kryptografieoperationen liegen im Main-Prozess. Die Oberfläche wird produktiv von einem ausschließlich an `127.0.0.1` gebundenen statischen Server ausgeliefert; dadurch steht für FIDO2 eine von Chromium akzeptierte lokale WebAuthn-Origin bereit. Es gibt keine Daten-API und keine Verbindung zu externen Netzen. Details: [ADR 0004](docs/architecture/adr-0004-electron-boundary.md) und [ADR 0005](docs/architecture/adr-0005-local-webauthn-origin.md).
 
-Vaulta schützt Daten auf einer ausgeschalteten oder gesperrten Festplatte und erkennt manipulierte Container. Es kann ein bereits kompromittiertes Windows, Administrator-Schadsoftware, Keylogger, manipulierte Zwischenablagen oder Kameras nicht zuverlässig beherrschen. Ohne Master- oder gültigen Wiederherstellungsschlüssel existiert keine Hintertür.
+Kryptris schützt Daten auf einer ausgeschalteten oder gesperrten Festplatte und erkennt manipulierte Container. Es kann ein bereits kompromittiertes Windows, Administrator-Schadsoftware, Keylogger, manipulierte Zwischenablagen oder Kameras nicht zuverlässig beherrschen. Ohne Master- oder gültigen Wiederherstellungsschlüssel existiert keine Hintertür.
 
 ## Entwicklung
 
@@ -53,7 +53,7 @@ startet den separaten Paket-Test direkt über Playwright mit `VAULTA_E2E_MODE=pa
 `VAULTA_E2E_EXECUTABLE`, damit eine bereits installierte und für E2E vorbereitete EXE geprüft werden
 kann.
 
-`pnpm make` erzeugt unter `release/` einen NSIS-Installer und portable ZIPs für x64 und ARM64. Die erste Ausgabe ist gemäß Produktentscheidung nicht codesigniert; Windows SmartScreen kann warnen. Updates und Deinstallation löschen `%APPDATA%\Vaulta` niemals automatisch.
+`pnpm make` erzeugt unter `release/` einen NSIS-Installer und portable ZIPs für x64 und ARM64. Die erste Ausgabe ist gemäß Produktentscheidung nicht codesigniert; Windows SmartScreen kann warnen. Updates und Deinstallation löschen `%APPDATA%\Vaulta` niemals automatisch, damit bestehende Daten erhalten bleiben.
 
 ## Datenablage
 
@@ -87,4 +87,4 @@ Weitere Nachweise:
 
 ## Datenschutz
 
-Vaulta enthält keine Telemetrie, Werbung, Crash-Uploads, Remote-Schriften, Remote-Bilder oder Datenleckabfragen. Diagnosemeldungen enthalten keine Feldwerte. Websites bleiben kopierbar; Links in Markdown werden ausschließlich als nicht anklickbarer Text dargestellt.
+Kryptris enthält keine Telemetrie, Werbung, Crash-Uploads, Remote-Schriften, Remote-Bilder oder Datenleckabfragen. Diagnosemeldungen enthalten keine Feldwerte. Websites bleiben kopierbar; Links in Markdown werden ausschließlich als nicht anklickbarer Text dargestellt.

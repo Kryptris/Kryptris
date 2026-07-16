@@ -54,7 +54,7 @@ export function useToasts() {
   useEffect(
     () =>
       window.vaulta.events.onClipboardCleared(() => {
-        notify('info', 'Zwischenablage geleert', 'Der von Vaulta kopierte Wert wurde entfernt.');
+        notify('info', 'Zwischenablage geleert', 'Der von Kryptris kopierte Wert wurde entfernt.');
       }),
     [notify],
   );

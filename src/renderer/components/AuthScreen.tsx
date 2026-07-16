@@ -122,7 +122,7 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
           confirmation: {},
         });
         onStateChange(nextState);
-        notify('success', 'Vaulta ist bereit', 'Dein erster Tresor wurde sicher angelegt.');
+        notify('success', 'Kryptris ist bereit', 'Dein erster Tresor wurde sicher angelegt.');
       }
     } catch (caught: unknown) {
       setError(getErrorMessage(caught));
@@ -149,7 +149,7 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
         confirmation: groupAnswers,
       });
       onStateChange(nextState);
-      notify('success', 'Vaulta ist bereit', 'Wiederherstellungsschlüssel bestätigt.');
+        notify('success', 'Kryptris ist bereit', 'Wiederherstellungsschlüssel bestätigt.');
     } catch (caught: unknown) {
       setError(getErrorMessage(caught));
     } finally {
@@ -166,7 +166,7 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
         <p className="eyebrow">Einmalige Anzeige</p>
         <h1 id="setup-recovery-title">Wiederherstellungsschlüssel sichern</h1>
         <p className="auth-card__lead">
-          Dieser Schlüssel ist der einzige zweite Zugang zu deinen Daten. Vaulta speichert ihn
+          Dieser Schlüssel ist der einzige zweite Zugang zu deinen Daten. Kryptris speichert ihn
           niemals im Klartext.
         </p>
         <InlineNotice kind="warning" title="Jetzt sicher aufbewahren">
@@ -193,19 +193,20 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
                   value={groupAnswers[String(index)] ?? ''}
                   autoComplete="off"
                   spellCheck={false}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const value = event.currentTarget.value.trim().toUpperCase();
                     setGroupAnswers((current) => ({
                       ...current,
-                      [String(index)]: event.currentTarget.value.trim().toUpperCase(),
-                    }))
-                  }
+                      [String(index)]: value,
+                    }));
+                  }}
                 />
               </Field>
             ))}
           </div>
           {error && <InlineNotice kind="error">{error}</InlineNotice>}
           <Button type="submit" variant="primary" busy={busy} icon={<Check />}>
-            Schlüssel bestätigen und Vaulta öffnen
+            Schlüssel bestätigen und Kryptris öffnen
           </Button>
         </form>
       </section>
@@ -217,14 +218,14 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
       <div className="auth-card__icon">
         <Sparkles />
       </div>
-      <p className="eyebrow">Willkommen bei Vaulta</p>
+      <p className="eyebrow">Willkommen bei Kryptris</p>
       <h1 id="setup-title">Dein sicherer, lokaler Tresor</h1>
       <p className="auth-card__lead">
         Richte ein lokales Profil ein. Deine Daten verlassen dieses Gerät nicht.
       </p>
       <form
         className="stack setup-form"
-        aria-label="Vaulta-Profil einrichten"
+        aria-label="Kryptris-Profil einrichten"
         onSubmit={(event) => void begin(event)}
       >
         <Field label="Name des ersten Tresors">
@@ -482,7 +483,7 @@ function UnlockFlow({ state, onStateChange, notify }: AuthScreenProps) {
         {stage === 'recovery' && 'Profil wiederherstellen'}
       </h1>
       <p className="auth-card__lead">
-        {stage === 'password' && 'Entsperre Vaulta mit deinem Master-Passwort.'}
+        {stage === 'password' && 'Entsperre Kryptris mit deinem Master-Passwort.'}
         {stage === 'totp' && 'Öffne deine TOTP-App und bestätige den aktuellen Code.'}
         {stage === 'security-key' &&
           'Verbinde deinen registrierten Schlüssel und bestätige die Windows-Abfrage.'}
@@ -502,7 +503,7 @@ function UnlockFlow({ state, onStateChange, notify }: AuthScreenProps) {
           </Field>
           {error && <InlineNotice kind="error">{error}</InlineNotice>}
           <Button type="submit" variant="primary" busy={busy} disabled={!password}>
-            Vaulta entsperren
+            Kryptris entsperren
           </Button>
           {state.factorStatus.recoveryEnabled && (
             <Button type="button" variant="ghost" onClick={() => setStage('recovery')}>

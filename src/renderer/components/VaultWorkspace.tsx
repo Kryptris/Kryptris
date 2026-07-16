@@ -342,7 +342,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
           Neuer Eintrag
         </Button>
         <IconButton
-          label="Vaulta jetzt sperren"
+          label="Kryptris jetzt sperren"
           className="no-drag"
           onClick={() => void window.vaulta.system.lock()}
         >

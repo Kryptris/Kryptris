@@ -432,6 +432,7 @@ function createLaunchEnvironment(userData: string): Record<string, string> {
   const environment: Record<string, string> = {
     APPDATA: userData,
     LOCALAPPDATA: userData,
+    KRYPTRIS_E2E_DATA_DIR: userData,
     NODE_ENV: 'test',
     Path: launchPath,
     PATH: launchPath,

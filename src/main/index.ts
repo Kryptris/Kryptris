@@ -174,8 +174,12 @@ async function createWindow(): Promise<void> {
   window.setContentProtection(true);
   hardenSession(window, renderer.development);
 
+  const e2eDataRoot = process.env.KRYPTRIS_E2E_DATA_DIR;
   controller = new VaultaController({
-    rootDir: path.join(app.getPath('userData'), 'data'),
+    rootDir:
+      e2eDataRoot === undefined
+        ? path.join(app.getPath('userData'), 'data')
+        : path.join(e2eDataRoot, 'data'),
     version: app.getVersion(),
     getWindow: () => mainWindow,
     getOrigin: () => allowedOrigin,

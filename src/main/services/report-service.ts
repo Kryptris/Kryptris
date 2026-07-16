@@ -6,6 +6,7 @@ import {
   type LocalReport,
   type SecuritySeverity,
   type VaultDocument,
+  type VaultEntry,
 } from '../../shared/models';
 import { entrySubtitle } from './entry-utils';
 import { SecurityCheckService } from './security-check-service';
@@ -15,21 +16,53 @@ export interface LocalReportOptions {
   now?: Date;
 }
 
+interface ReportState {
+  now: Date;
+  oldestLimit: number;
+  vaults: readonly VaultDocument[];
+  activeEntries: VaultEntry[];
+  trashedEntries: VaultEntry[];
+}
+
 export class ReportService {
   public constructor(private readonly securityService = new SecurityCheckService()) {}
 
   public generate(vaults: readonly VaultDocument[], options: LocalReportOptions = {}): LocalReport {
+    const state = this.createState(vaults, options);
+    return this.createReport(
+      state,
+      this.securityService.scan(state.activeEntries, { now: state.now }),
+    );
+  }
+
+  public async generateAsync(
+    vaults: readonly VaultDocument[],
+    options: LocalReportOptions = {},
+  ): Promise<LocalReport> {
+    const state = this.createState(vaults, options);
+    const security = await this.securityService.scanAsync(state.activeEntries, { now: state.now });
+    return this.createReport(state, security);
+  }
+
+  private createState(vaults: readonly VaultDocument[], options: LocalReportOptions): ReportState {
     const now = options.now ?? new Date();
     const oldestLimit = options.oldestLimit ?? 10;
     if (Number.isNaN(now.getTime())) throw invalid('Der Berichtszeitpunkt ist ungueltig.');
     if (!Number.isInteger(oldestLimit) || oldestLimit < 0 || oldestLimit > 100) {
       throw invalid('Die Anzahl der aeltesten Eintraege ist ungueltig.');
     }
-
     const allEntries = vaults.flatMap((vault) => vault.entries);
-    const activeEntries = allEntries.filter((entry) => entry.deletedAt === null);
-    const trashedEntries = allEntries.filter((entry) => entry.deletedAt !== null);
-    const security = this.securityService.scan(activeEntries, { now });
+    return {
+      now,
+      oldestLimit,
+      vaults,
+      activeEntries: allEntries.filter((entry) => entry.deletedAt === null),
+      trashedEntries: allEntries.filter((entry) => entry.deletedAt !== null),
+    };
+  }
+
+  private createReport(state: ReportState, security: LocalReport['security']): LocalReport {
+    const { activeEntries, oldestLimit, trashedEntries, vaults } = state;
     const severityByEntry = new Map<string, SecuritySeverity>();
     for (const finding of security.findings) {
       const current = severityByEntry.get(finding.entryId) ?? 'good';
@@ -62,7 +95,7 @@ export class ReportService {
       }));
 
     return {
-      generatedAt: now.toISOString(),
+      generatedAt: state.now.toISOString(),
       vaultCount: vaults.length,
       entryCount: activeEntries.length,
       favoriteCount: activeEntries.filter((entry) => entry.favorite).length,

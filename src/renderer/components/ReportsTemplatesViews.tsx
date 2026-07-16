@@ -27,29 +27,21 @@ import { ENTRY_ACCENTS, formatBytes, formatDate, getErrorMessage } from '../util
 import { Button, EmptyState, Field, IconButton, InlineNotice, LoadingState, Modal } from './ui';
 
 export function ReportsView({
-  notify,
+  report,
+  loading,
+  onEnsureReport,
+  onRefresh,
   onOpenEntry,
 }: {
-  notify: Notify;
+  report: LocalReport | null;
+  loading: boolean;
+  onEnsureReport: () => void;
+  onRefresh: () => void;
   onOpenEntry: (entryId: string) => void;
 }) {
-  const [report, setReport] = useState<LocalReport | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const generate = useCallback(async () => {
-    setLoading(true);
-    try {
-      setReport(await window.vaulta.reports.generate());
-    } catch (error: unknown) {
-      notify('error', 'Bericht konnte nicht erzeugt werden', getErrorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [notify]);
-
   useEffect(() => {
-    void generate();
-  }, [generate]);
+    onEnsureReport();
+  }, [onEnsureReport]);
 
   return (
     <section className="tool-view" aria-labelledby="reports-title">
@@ -67,7 +59,7 @@ export function ReportsView({
             </p>
           </div>
         </div>
-        <Button icon={<RefreshCw />} busy={loading} onClick={() => void generate()}>
+        <Button icon={<RefreshCw />} busy={loading} onClick={onRefresh}>
           Neu berechnen
         </Button>
       </header>

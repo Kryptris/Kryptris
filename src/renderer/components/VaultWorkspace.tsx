@@ -1,4 +1,4 @@
-import { ChevronDown, LockKeyhole, Menu, Plus, Search, Settings, X } from 'lucide-react';
+import { Check, ChevronDown, LockKeyhole, Menu, Plus, Search, Settings, X } from 'lucide-react';
 import type { Dispatch, SetStateAction } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -11,6 +11,8 @@ import type {
   EntryType,
   EntryView,
   Folder,
+  LocalReport,
+  SecurityReport,
 } from '../../shared/models';
 import type { EntryFilters, Notify, WorkspaceSection } from '../types';
 import { createEntryFromTemplate, getErrorMessage, toEntryInput } from '../utils';
@@ -56,13 +58,63 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   const [folderManagerOpen, setFolderManagerOpen] = useState(false);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [vaultPickerOpen, setVaultPickerOpen] = useState(false);
+  const [securityReports, setSecurityReports] = useState<Record<string, SecurityReport>>({});
+  const [securityLoading, setSecurityLoading] = useState<Record<string, boolean>>({});
+  const [localReport, setLocalReport] = useState<LocalReport | null>(null);
+  const [localReportLoading, setLocalReportLoading] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const vaultPickerRef = useRef<HTMLDivElement>(null);
+  const securityRequests = useRef(new Set<string>());
+  const localReportRequest = useRef(false);
 
   const activeVault =
     state.vaults.find((vault) => vault.id === state.activeVaultId) ?? state.vaults[0] ?? null;
   const activeVaultId = activeVault?.id ?? null;
   const isEntrySection = ENTRY_SECTIONS.includes(section);
   const listView: EntryView = isEntrySection ? (section as EntryView) : 'all';
+
+  const loadSecurityReport = useCallback(
+    async (refresh = false) => {
+      if (!activeVaultId || (!refresh && securityReports[activeVaultId])) return;
+      if (securityRequests.current.has(activeVaultId)) return;
+      securityRequests.current.add(activeVaultId);
+      setSecurityLoading((current) => ({ ...current, [activeVaultId]: true }));
+      try {
+        const report = await window.vaulta.security.scan(activeVaultId);
+        setSecurityReports((current) => ({ ...current, [activeVaultId]: report }));
+        notify(
+          'success',
+          'Lokaler Sicherheitscheck abgeschlossen',
+          'Es wurden keine Daten übertragen.',
+        );
+      } catch (error: unknown) {
+        notify('error', 'Sicherheitscheck fehlgeschlagen', getErrorMessage(error));
+      } finally {
+        securityRequests.current.delete(activeVaultId);
+        setSecurityLoading((current) => ({ ...current, [activeVaultId]: false }));
+      }
+    },
+    [activeVaultId, notify, securityReports],
+  );
+
+  const loadLocalReport = useCallback(
+    async (refresh = false) => {
+      if (!refresh && localReport !== null) return;
+      if (localReportRequest.current) return;
+      localReportRequest.current = true;
+      setLocalReportLoading(true);
+      try {
+        setLocalReport(await window.vaulta.reports.generate());
+      } catch (error: unknown) {
+        notify('error', 'Bericht konnte nicht erzeugt werden', getErrorMessage(error));
+      } finally {
+        localReportRequest.current = false;
+        setLocalReportLoading(false);
+      }
+    },
+    [localReport, notify],
+  );
 
   const query = useMemo<EntryListQuery | null>(
     () =>
@@ -164,6 +216,24 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     return () => window.removeEventListener('keydown', handler);
   }, [activeVaultId, filters.types]);
 
+  useEffect(() => {
+    if (!vaultPickerOpen) return;
+    const close = (event: PointerEvent) => {
+      if (event.target instanceof Node && !vaultPickerRef.current?.contains(event.target)) {
+        setVaultPickerOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setVaultPickerOpen(false);
+    };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [vaultPickerOpen]);
+
   const chooseVault = async (vaultId: string) => {
     try {
       await window.vaulta.vaults.select(vaultId);
@@ -171,6 +241,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
       onStateChange(next);
       setSelectedEntryId(null);
       setDetail(null);
+      setVaultPickerOpen(false);
     } catch (error: unknown) {
       notify('error', 'Tresor konnte nicht gewechselt werden', getErrorMessage(error));
     }
@@ -294,25 +365,81 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         <IconButton
           label={sidebarOpen ? 'Navigation schließen' : 'Navigation öffnen'}
           className="topbar__menu no-drag"
-          onClick={() => setSidebarOpen((current) => !current)}
+          onClick={() => {
+            setVaultPickerOpen(false);
+            setSidebarOpen((current) => !current);
+          }}
         >
           {sidebarOpen ? <X /> : <Menu />}
         </IconButton>
         <Brand />
-        <div className="vault-select no-drag">
-          <LockKeyhole />
-          <select
+        <div className="vault-picker no-drag" ref={vaultPickerRef}>
+          <button
+            type="button"
+            className="vault-picker__trigger"
             aria-label="Aktiven Tresor wählen"
-            value={activeVault.id}
-            onChange={(event) => void chooseVault(event.currentTarget.value)}
+            aria-expanded={vaultPickerOpen}
+            aria-haspopup="listbox"
+            onClick={() => setVaultPickerOpen((current) => !current)}
           >
-            {state.vaults.map((vault) => (
-              <option value={vault.id} key={vault.id}>
-                {vault.name}
-              </option>
-            ))}
-          </select>
-          <ChevronDown />
+            <span className="vault-picker__icon" style={{ background: activeVault.color }}>
+              <LockKeyhole />
+            </span>
+            <span className="vault-picker__current">
+              <strong>{activeVault.name}</strong>
+              <small>{String(activeVault.entryCount)} Einträge</small>
+            </span>
+            <ChevronDown className={vaultPickerOpen ? 'is-open' : ''} />
+          </button>
+          {vaultPickerOpen && (
+            <div className="vault-picker__menu" role="listbox" aria-label="Verfügbare Tresore">
+              <header>
+                <span>Tresor wechseln</span>
+                <small>{String(state.vaults.length)} verfügbar</small>
+              </header>
+              <div className="vault-picker__options">
+                {state.vaults.map((vault) => {
+                  const selected = vault.id === activeVault.id;
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={selected ? 'is-active' : ''}
+                      key={vault.id}
+                      onClick={() => void chooseVault(vault.id)}
+                    >
+                      <span
+                        className="vault-picker__option-icon"
+                        style={{ background: vault.color }}
+                      >
+                        <LockKeyhole />
+                      </span>
+                      <span>
+                        <strong>{vault.name}</strong>
+                        <small>
+                          {String(vault.entryCount)} Einträge · {String(vault.deletedCount)} im
+                          Papierkorb
+                        </small>
+                      </span>
+                      {selected && <Check aria-label="Aktiver Tresor" />}
+                    </button>
+                  );
+                })}
+              </div>
+              <footer>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setVaultPickerOpen(false);
+                    setVaultManagerOpen(true);
+                  }}
+                >
+                  Tresore verwalten
+                </button>
+              </footer>
+            </div>
+          )}
         </div>
         <label className="global-search no-drag">
           <Search />
@@ -379,6 +506,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         {isEntrySection ? (
           <>
             <EntryList
+              key={sidebarOpen ? 'sidebar-open' : 'sidebar-closed'}
               section={section}
               entries={entries}
               selectedEntryId={selectedEntryId}
@@ -408,7 +536,13 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         ) : (
           <div className="tool-host">
             {section === 'security' && (
-              <SecurityView vaultId={activeVault.id} notify={notify} onOpenEntry={openEntry} />
+              <SecurityView
+                report={securityReports[activeVault.id] ?? null}
+                loading={securityLoading[activeVault.id] === true}
+                onEnsureReport={() => void loadSecurityReport()}
+                onRefresh={() => void loadSecurityReport(true)}
+                onOpenEntry={openEntry}
+              />
             )}
             {section === 'backup' && (
               <BackupView state={state} notify={notify} onStateChange={onStateChange} />
@@ -439,7 +573,15 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
                 }
               />
             )}
-            {section === 'reports' && <ReportsView notify={notify} onOpenEntry={openEntry} />}
+            {section === 'reports' && (
+              <ReportsView
+                report={localReport}
+                loading={localReportLoading}
+                onEnsureReport={() => void loadLocalReport()}
+                onRefresh={() => void loadLocalReport(true)}
+                onOpenEntry={openEntry}
+              />
+            )}
           </div>
         )}
       </div>

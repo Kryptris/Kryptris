@@ -1086,7 +1086,7 @@ export class VaultaController {
     const documents =
       vaultId === undefined ? await this.readAllVaults() : [await this.vaults.readVault(vaultId)];
     this.assertAuthenticated(epoch);
-    const report = this.security.scan(
+    const report = await this.security.scanAsync(
       documents.flatMap((document) => document.entries).filter((entry) => entry.deletedAt === null),
     );
     this.assertAuthenticated(epoch);
@@ -1589,7 +1589,7 @@ export class VaultaController {
     const epoch = this.requireUnlocked();
     const vaults = await this.readAllVaults();
     this.assertAuthenticated(epoch);
-    const report = this.reports.generate(vaults);
+    const report = await this.reports.generateAsync(vaults);
     this.assertAuthenticated(epoch);
     return report;
   }

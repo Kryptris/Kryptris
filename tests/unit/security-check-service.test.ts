@@ -57,4 +57,15 @@ describe('SecurityCheckService', () => {
     ]);
     expect(report.findings.some((finding) => finding.kind === 'sensitive-field')).toBe(true);
   });
+
+  it('liefert asynchron dasselbe Ergebnis und gibt zwischen Arbeitsabschnitten frei', async () => {
+    const entries = Array.from({ length: 26 }, (_, index) =>
+      credentialEntry({ id: `entry-${index}`, password: `password-${index}` }),
+    );
+    const options = { now: new Date('2026-07-14T00:00:00.000Z') };
+
+    await expect(service.scanAsync(entries, options)).resolves.toEqual(
+      service.scan(entries, options),
+    );
+  });
 });

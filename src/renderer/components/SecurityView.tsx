@@ -8,45 +8,28 @@ import {
   WifiOff,
 } from 'lucide-react';
 import type { CSSProperties } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect } from 'react';
 
 import type { SecurityReport } from '../../shared/models';
-import type { Notify } from '../types';
-import { formatDate, getErrorMessage } from '../utils';
+import { formatDate } from '../utils';
 import { Button, EmptyState, LoadingState } from './ui';
 
 export function SecurityView({
-  vaultId,
-  notify,
+  report,
+  loading,
+  onEnsureReport,
+  onRefresh,
   onOpenEntry,
 }: {
-  vaultId: string;
-  notify: Notify;
+  report: SecurityReport | null;
+  loading: boolean;
+  onEnsureReport: () => void;
+  onRefresh: () => void;
   onOpenEntry: (entryId: string) => void;
 }) {
-  const [report, setReport] = useState<SecurityReport | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const scan = useCallback(async () => {
-    setLoading(true);
-    try {
-      const next = await window.vaulta.security.scan(vaultId);
-      setReport(next);
-      notify(
-        'success',
-        'Lokaler Sicherheitscheck abgeschlossen',
-        'Es wurden keine Daten übertragen.',
-      );
-    } catch (error: unknown) {
-      notify('error', 'Sicherheitscheck fehlgeschlagen', getErrorMessage(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [notify, vaultId]);
-
   useEffect(() => {
-    void scan();
-  }, [scan]);
+    onEnsureReport();
+  }, [onEnsureReport]);
 
   return (
     <section className="tool-view security-view" aria-labelledby="security-view-title">
@@ -61,7 +44,7 @@ export function SecurityView({
             <p>Schwache, wiederverwendete, alte und unvollständige Zugangsdaten erkennen.</p>
           </div>
         </div>
-        <Button icon={<RefreshCw />} busy={loading} onClick={() => void scan()}>
+        <Button icon={<RefreshCw />} busy={loading} onClick={onRefresh}>
           Erneut prüfen
         </Button>
       </header>
@@ -148,7 +131,7 @@ export function SecurityView({
           title="Kein Bericht verfügbar"
           description="Starte den lokalen Sicherheitscheck erneut."
           action={
-            <Button icon={<RefreshCw />} onClick={() => void scan()}>
+            <Button icon={<RefreshCw />} onClick={onRefresh}>
               Prüfung starten
             </Button>
           }

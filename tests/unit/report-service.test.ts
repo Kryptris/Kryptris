@@ -43,4 +43,14 @@ describe('ReportService', () => {
     expect(report.oldestEntries[0]?.id).toBe('active');
     expect(report.security.networkUsed).toBe(false);
   });
+
+  it('liefert den Bericht auch asynchron unveraendert', async () => {
+    const vaults = [vaultDocument([credentialEntry({ password: 'password' })])];
+    const options = { now: new Date('2026-07-14T00:00:00.000Z') };
+    const service = new ReportService();
+
+    await expect(service.generateAsync(vaults, options)).resolves.toEqual(
+      service.generate(vaults, options),
+    );
+  });
 });

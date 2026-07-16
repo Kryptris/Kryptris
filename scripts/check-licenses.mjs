@@ -7,6 +7,7 @@ const require = createRequire(import.meta.url);
 const pnpmManifestPath = require.resolve('pnpm');
 const pnpmManifest = require(pnpmManifestPath);
 const pnpmCli = path.join(path.dirname(pnpmManifestPath), pnpmManifest.bin.pnpm);
+console.error(`Führe aus: ${process.execPath} ${pnpmCli} licenses list --prod --json`);
 const result = spawnSync(process.execPath, [pnpmCli, 'licenses', 'list', '--prod', '--json'], {
   encoding: 'utf8',
   shell: false,
@@ -15,7 +16,11 @@ const result = spawnSync(process.execPath, [pnpmCli, 'licenses', 'list', '--prod
 
 if (result.error !== undefined) throw result.error;
 if (result.status !== 0) {
-  process.stderr.write(result.stderr);
+  process.stderr.write(
+    `pnpm-Exit-Code: ${result.status ?? 'null'}; Signal: ${result.signal ?? 'keins'}\n`,
+  );
+  process.stderr.write(`--- stdout ---\n${result.stdout || '<leer>'}\n`);
+  process.stderr.write(`--- stderr ---\n${result.stderr || '<leer>'}\n`);
   throw new Error(`pnpm licenses wurde mit Status ${result.status ?? 'unbekannt'} beendet.`);
 }
 

@@ -271,6 +271,31 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     });
     expect(remoteFetch).toBe('blocked');
 
+    // Der eigentliche Navigations-Härtungstest (Popup-Block, blockierter
+    // window.location.assign) läuft bewusst ganz am Ende des Tests, direkt vor
+    // closeVaulta(sourceApp): Nach einem geblockten window.location.assign
+    // bleibt Playwrights CDP-Verbindung zu diesem Fenster dauerhaft in einem
+    // "Navigation läuft noch"-Zustand hängen (bekannter Electron/CDP-Quirk),
+    // wodurch praktisch jede Locator-Interaktion (click, fill, expect, sogar
+    // dispatchEvent/boundingBox) im Fenster danach nicht mehr zuverlässig
+    // funktioniert. Deshalb erst alle CRUD-/Trash-/Import-/Export-Schritte mit
+    // normalen, unbeeinträchtigten Locators erledigen und den Härtungscheck
+    // zuletzt ausführen, wo direkt danach nur noch closeVaulta() folgt.
+
+    await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
+    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
+    await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
+    await expect(page.getByText('Eintrag in den Papierkorb verschoben')).toBeVisible();
+    await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
+    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
+    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
+    await page.getByTestId('purge-entry-button').click();
+    const purgeDialog = page.getByRole('dialog', { name: 'Eintrag endgültig löschen?' });
+    await purgeDialog.getByLabel('Master-Passwort').fill(masterPassword);
+    await purgeDialog.getByRole('button', { name: 'Endgültig löschen', exact: true }).click();
+    await expect(page.getByText('Eintrag endgültig gelöscht')).toBeVisible();
+    await expect(page.getByRole('option', { name: new RegExp(updatedTitle, 'u') })).toHaveCount(0);
+
     const sourceUrl = page.url();
     const windowCount = sourceApp.windows().length;
     await page.evaluate(() => {
@@ -294,29 +319,6 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
       () => document.querySelector('input[aria-label="Tresor durchsuchen"]') !== null,
     );
     expect(searchInputPresent).toBe(true);
-
-    // Ersten Klick nach dem geblockten Navigationsversuch bewusst per rohem DOM-Event
-    // auslösen: Playwrights locator.click() kann hier wegen eines bekannten
-    // Electron/CDP-Timings gelegentlich dauerhaft auf "waiting for navigation to
-    // finish" hängen bleiben, obwohl die Navigation korrekt blockiert wurde.
-    await page.evaluate(() => {
-      const button = Array.from(document.querySelectorAll('button')).find(
-        (candidate) => candidate.textContent?.trim() === 'Alle Einträge',
-      );
-      button?.click();
-    });
-    await page.waitForTimeout(300);
-
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
-    await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
-    await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
-    await page.getByRole('button', { name: 'Endgültig löschen', exact: true }).click();
-    const purgeDialog = page.getByRole('dialog', { name: 'Eintrag endgültig löschen?' });
-    await purgeDialog.getByLabel('Master-Passwort').fill(masterPassword);
-    await purgeDialog.getByRole('button', { name: 'Endgültig löschen', exact: true }).click();
-    await expect(page.getByText('Eintrag endgültig gelöscht')).toBeVisible();
-    await expect(page.getByRole('option', { name: new RegExp(updatedTitle, 'u') })).toHaveCount(0);
 
     await closeVaulta(sourceApp);
     sourceApp = undefined;
@@ -342,7 +344,8 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     });
     await expect(restoredUpdatedEntry).toBeVisible();
     await restoredUpdatedEntry.click();
-    await expect(restoredPage.getByText('e2e@example.test', { exact: true })).toBeVisible();
+    const restoredDetailPanel = restoredPage.getByLabel(`Details für ${updatedTitle}`);
+    await expect(restoredDetailPanel.getByText('e2e@example.test', { exact: true })).toBeVisible();
     await restoredPage.getByRole('button', { name: 'Passwort anzeigen' }).click();
     await expect(restoredPage.getByText(entryPassword, { exact: true })).toBeVisible();
     await restoredPage.getByRole('button', { name: 'Passwort ausblenden' }).click();

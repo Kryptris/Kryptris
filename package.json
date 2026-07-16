@@ -23,7 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "npm run build && cross-env VAULTA_E2E_MODE=workspace playwright test",
+    "test:e2e": "cross-env VAULTA_E2E_MODE=workspace npm run build && cross-env VAULTA_E2E_MODE=workspace playwright test",
     "package": "npm run build && electron-builder --dir",
     "make": "node scripts/clean-release.mjs && npm run build && electron-builder --win --publish never",
     "audit:prod": "pnpm audit --prod --audit-level high",

@@ -157,9 +157,10 @@ export function EntryEditor({
                   value={entry.title}
                   maxLength={160}
                   autoFocus
-                  onChange={(event) =>
-                    mutate((draft) => void (draft.title = event.currentTarget.value))
-                  }
+                  onChange={(event) => {
+                    const next = event.currentTarget.value;
+                    mutate((draft) => void (draft.title = next));
+                  }}
                 />
               </Field>
               <Field
@@ -170,9 +171,10 @@ export function EntryEditor({
               >
                 <select
                   value={entry.folderId ?? ''}
-                  onChange={(event) =>
-                    mutate((draft) => void (draft.folderId = event.currentTarget.value || null))
-                  }
+                  onChange={(event) => {
+                    const next = event.currentTarget.value || null;
+                    mutate((draft) => void (draft.folderId = next));
+                  }}
                 >
                   <option value="">Ohne Ordner</option>
                   {knownFolders.map((folder) => (
@@ -187,23 +189,25 @@ export function EntryEditor({
               <input
                 value={entry.tags.join(', ')}
                 placeholder="z. B. Arbeit, Wichtig"
-                onChange={(event) =>
+                onChange={(event) => {
+                  const next = event.currentTarget.value
+                    .split(',')
+                    .map((tag) => tag.trim())
+                    .filter(Boolean);
                   mutate((draft) => {
-                    draft.tags = event.currentTarget.value
-                      .split(',')
-                      .map((tag) => tag.trim())
-                      .filter(Boolean);
-                  })
-                }
+                    draft.tags = next;
+                  });
+                }}
               />
             </Field>
             <label className="check-row check-row--compact">
               <input
                 type="checkbox"
                 checked={entry.favorite}
-                onChange={(event) =>
-                  mutate((draft) => void (draft.favorite = event.currentTarget.checked))
-                }
+                onChange={(event) => {
+                  const next = event.currentTarget.checked;
+                  mutate((draft) => void (draft.favorite = next));
+                }}
               />
               <span>Als Favorit markieren</span>
             </label>
@@ -290,9 +294,10 @@ export function EntryEditor({
                 rows={6}
                 value={entry.note}
                 placeholder="Zusätzliche sichere Informationen …"
-                onChange={(event) =>
-                  mutate((draft) => void (draft.note = event.currentTarget.value))
-                }
+                onChange={(event) => {
+                  const next = event.currentTarget.value;
+                  mutate((draft) => void (draft.note = next));
+                }}
               />
             </Field>
           </section>
@@ -407,10 +412,11 @@ function TypeFields({
             <input
               type="checkbox"
               checked={Boolean(value.totp)}
-              onChange={(event) =>
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
                 mutate((draft) => {
                   if (draft.data.type !== 'credential') return;
-                  if (event.currentTarget.checked) {
+                  if (checked) {
                     draft.data.value.totp = {
                       secret: '',
                       issuer: '',
@@ -422,8 +428,8 @@ function TypeFields({
                   } else {
                     delete draft.data.value.totp;
                   }
-                })
-              }
+                });
+              }}
             />
             <span>
               <strong>TOTP-Code erzeugen</strong>
@@ -489,13 +495,13 @@ function TypeFields({
                 <Field label="Algorithmus">
                   <select
                     value={value.totp.algorithm}
-                    onChange={(event) =>
+                    onChange={(event) => {
+                      const next = event.currentTarget.value as 'SHA1' | 'SHA256' | 'SHA512';
                       mutate((draft) => {
                         if (draft.data.type === 'credential' && draft.data.value.totp)
-                          draft.data.value.totp.algorithm = event.currentTarget.value as
-                            'SHA1' | 'SHA256' | 'SHA512';
-                      })
-                    }
+                          draft.data.value.totp.algorithm = next;
+                      });
+                    }}
                   >
                     <option>SHA1</option>
                     <option>SHA256</option>
@@ -542,12 +548,12 @@ function TypeFields({
             <textarea
               rows={12}
               value={entry.data.value.markdown}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.value;
                 mutate((draft) => {
-                  if (draft.data.type === 'secure-note')
-                    draft.data.value.markdown = event.currentTarget.value;
-                })
-              }
+                  if (draft.data.type === 'secure-note') draft.data.value.markdown = next;
+                });
+              }}
             />
           </Field>
         </EditorSection>
@@ -665,12 +671,12 @@ function TypeFields({
             <textarea
               rows={3}
               value={value.billingAddress}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.value;
                 mutate((draft) => {
-                  if (draft.data.type === 'credit-card')
-                    draft.data.value.billingAddress = event.currentTarget.value;
-                })
-              }
+                  if (draft.data.type === 'credit-card') draft.data.value.billingAddress = next;
+                });
+              }}
             />
           </Field>
         </EditorSection>
@@ -808,13 +814,12 @@ function TypeFields({
             <Field label="Sicherheitsart">
               <select
                 value={value.security}
-                onChange={(event) =>
+                onChange={(event) => {
+                  const next = event.currentTarget.value as typeof value.security;
                   mutate((draft) => {
-                    if (draft.data.type === 'wifi')
-                      draft.data.value.security = event.currentTarget
-                        .value as typeof value.security;
-                  })
-                }
+                    if (draft.data.type === 'wifi') draft.data.value.security = next;
+                  });
+                }}
               >
                 {['WPA3', 'WPA2', 'WPA', 'WEP', 'Offen', 'Andere'].map((item) => (
                   <option key={item}>{item}</option>
@@ -853,12 +858,12 @@ function TypeFields({
             <input
               type="checkbox"
               checked={value.hidden}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.checked;
                 mutate((draft) => {
-                  if (draft.data.type === 'wifi')
-                    draft.data.value.hidden = event.currentTarget.checked;
-                })
-              }
+                  if (draft.data.type === 'wifi') draft.data.value.hidden = next;
+                });
+              }}
             />
             <span>Verstecktes Netzwerk</span>
           </label>
@@ -1051,12 +1056,12 @@ function TypeFields({
               rows={5}
               spellCheck={false}
               value={value.publicKey}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.value;
                 mutate((draft) => {
-                  if (draft.data.type === 'ssh-key')
-                    draft.data.value.publicKey = event.currentTarget.value;
-                })
-              }
+                  if (draft.data.type === 'ssh-key') draft.data.value.publicKey = next;
+                });
+              }}
             />
           </Field>
           <Field label="Privater Schlüssel">
@@ -1082,12 +1087,12 @@ function TypeFields({
             <textarea
               rows={5}
               value={entry.data.value.description}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.value;
                 mutate((draft) => {
-                  if (draft.data.type === 'file')
-                    draft.data.value.description = event.currentTarget.value;
-                })
-              }
+                  if (draft.data.type === 'file') draft.data.value.description = next;
+                });
+              }}
             />
           </Field>
           <InlineNotice kind="info">
@@ -1106,12 +1111,12 @@ function TypeFields({
             <textarea
               rows={5}
               value={entry.data.value.description}
-              onChange={(event) =>
+              onChange={(event) => {
+                const next = event.currentTarget.value;
                 mutate((draft) => {
-                  if (draft.data.type === 'custom')
-                    draft.data.value.description = event.currentTarget.value;
-                })
-              }
+                  if (draft.data.type === 'custom') draft.data.value.description = next;
+                });
+              }}
             />
           </Field>
         </EditorSection>

@@ -8,7 +8,7 @@ export default defineConfig({
   build: {
     outDir: '../../dist/renderer',
     emptyOutDir: true,
-    sourcemap: false,
+    sourcemap: process.env.VAULTA_E2E_MODE === 'workspace',
   },
   server: {
     host: '127.0.0.1',

@@ -50,7 +50,9 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     const page = await sourceApp.firstWindow();
     page.on('console', (message) => console.log('Electron-Renderer-Konsole', message.type(), message.text()));
     page.on('crash', () => console.log('Electron-Renderer-Crash'));
-    page.on('pageerror', (error) => console.log('Electron-Renderer-Fehler', error.message));
+    page.on('pageerror', (error) =>
+      console.log('Electron-Renderer-Fehler', error.message, '\n', error.stack),
+    );
     await installControlledDialogs(sourceApp, { importPath, backupPath, cleartextPath });
     await waitForSetupScreen(page);
 
@@ -154,6 +156,45 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await newEntryDialog.getByRole('button', { name: 'Eintrag verschlüsselt speichern' }).click();
 
     await expect(page.getByRole('heading', { name: originalTitle })).toBeVisible();
+    const detailDiagnostics = await page.evaluate(() => ({
+      buttons: Array.from(document.querySelectorAll<HTMLButtonElement>('.detail-header button')).map(
+        (button) => button.textContent?.trim() ?? '',
+      ),
+      detailHeaderActionsHtml:
+        document.querySelector('.detail-header__actions')?.outerHTML ?? '<fehlt>',
+      toasts: Array.from(document.querySelectorAll('[role="status"], [role="alert"]')).map(
+        (node) => node.textContent?.trim() ?? '',
+      ),
+    }));
+    console.log('Electron-DetailPanel-Diagnose', JSON.stringify(detailDiagnostics));
+    const actionabilitySamples: unknown[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const sample = await page.evaluate(() => {
+        const button = Array.from(
+          document.querySelectorAll<HTMLButtonElement>('.detail-header__actions button'),
+        ).find((candidate) => candidate.textContent?.includes('Bearbeiten'));
+        if (!button) return { found: false };
+        const rect = button.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const atPoint = document.elementFromPoint(centerX, centerY);
+        return {
+          found: true,
+          rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+          disabled: button.disabled,
+          visibility: getComputedStyle(button).visibility,
+          display: getComputedStyle(button).display,
+          opacity: getComputedStyle(button).opacity,
+          pointerEvents: getComputedStyle(button).pointerEvents,
+          elementAtPointIsButton: atPoint === button,
+          elementAtPointTag: atPoint?.tagName ?? null,
+          elementAtPointClass: atPoint instanceof HTMLElement ? atPoint.className : null,
+        };
+      });
+      actionabilitySamples.push(sample);
+      await page.waitForTimeout(200);
+    }
+    console.log('Electron-Bearbeiten-Actionability', JSON.stringify(actionabilitySamples));
     await page.getByRole('button', { name: 'Bearbeiten' }).click();
     await page.getByLabel('Titel').fill(updatedTitle);
     await page.getByRole('button', { name: 'Änderungen speichern' }).click();

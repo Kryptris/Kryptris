@@ -228,6 +228,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await expect(page.getByPlaceholder('Tresor durchsuchen')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
 
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Import', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Daten importieren' })).toBeVisible();
     await page.getByRole('button', { name: /Google Chrome/u }).click();
@@ -235,9 +236,11 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await expect(page.getByText('E2E Importierter Dienst')).toBeVisible();
     await page.getByRole('button', { name: 'Auswahl verschlüsselt importieren' }).click();
     await expect(page.getByText('1 Einträge importiert')).toBeVisible();
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
     await expect(page.getByRole('heading', { name: 'E2E Importierter Dienst' })).toBeVisible();
 
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Export', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Daten exportieren' })).toBeVisible();
     await page.getByRole('button', { name: 'Exportziel wählen' }).click();
@@ -284,6 +287,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     // normalen, unbeeinträchtigten Locators erledigen und den Härtungscheck
     // zuletzt ausführen, wo direkt danach nur noch closeVaulta() folgt.
 
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
     await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
     await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
@@ -341,6 +345,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await expect(restoredPage.getByPlaceholder('Tresor durchsuchen')).toBeVisible({
       timeout: 45_000,
     });
+    await openSidebarNavigation(restoredPage);
     await restoredPage.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
     const restoredUpdatedEntry = restoredPage.getByRole('option', {
       name: new RegExp(updatedTitle, 'u'),

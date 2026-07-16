@@ -149,7 +149,7 @@ function SetupFlow({ onStateChange, notify }: Pick<AuthScreenProps, 'onStateChan
         confirmation: groupAnswers,
       });
       onStateChange(nextState);
-        notify('success', 'Kryptris ist bereit', 'Wiederherstellungsschlüssel bestätigt.');
+      notify('success', 'Kryptris ist bereit', 'Wiederherstellungsschlüssel bestätigt.');
     } catch (caught: unknown) {
       setError(getErrorMessage(caught));
     } finally {

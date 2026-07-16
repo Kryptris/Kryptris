@@ -432,7 +432,7 @@ describe('Vaulta Renderer', () => {
     render(<App />);
 
     const entryList = await screen.findByLabelText('Eintragsliste');
-    fireEvent.click(within(entryList).getByRole('button', { name: 'Neuer Eintrag' }));
+    fireEvent.click(await within(entryList).findByRole('button', { name: 'Neuer Eintrag' }));
     const dialog = screen.getByRole('dialog', { name: 'Neuen Eintrag anlegen' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Zugangsdaten' }));
 

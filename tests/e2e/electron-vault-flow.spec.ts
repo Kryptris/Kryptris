@@ -48,7 +48,9 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
   try {
     sourceApp = await launchVaulta(sourceUserData);
     const page = await sourceApp.firstWindow();
-    page.on('console', (message) => console.log('Electron-Renderer-Konsole', message.type(), message.text()));
+    page.on('console', (message) =>
+      console.log('Electron-Renderer-Konsole', message.type(), message.text()),
+    );
     page.on('crash', () => console.log('Electron-Renderer-Crash'));
     page.on('pageerror', (error) =>
       console.log('Electron-Renderer-Fehler', error.message, '\n', error.stack),
@@ -119,9 +121,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
       url: window.location.href,
       dialogs: Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).map(
         (dialog) => ({
-          activeTypes: Array.from(
-            dialog.querySelectorAll<HTMLButtonElement>('.type-picker button'),
-          )
+          activeTypes: Array.from(dialog.querySelectorAll<HTMLButtonElement>('.type-picker button'))
             .filter((button) => button.getAttribute('aria-pressed') === 'true')
             .map((button) => button.textContent?.trim() ?? ''),
           headings: Array.from(dialog.querySelectorAll('h2, h3')).map(
@@ -157,9 +157,9 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
 
     await expect(page.getByRole('heading', { name: originalTitle })).toBeVisible();
     const detailDiagnostics = await page.evaluate(() => ({
-      buttons: Array.from(document.querySelectorAll<HTMLButtonElement>('.detail-header button')).map(
-        (button) => button.textContent?.trim() ?? '',
-      ),
+      buttons: Array.from(
+        document.querySelectorAll<HTMLButtonElement>('.detail-header button'),
+      ).map((button) => button.textContent?.trim() ?? ''),
       detailHeaderActionsHtml:
         document.querySelector('.detail-header__actions')?.outerHTML ?? '<fehlt>',
       toasts: Array.from(document.querySelectorAll('[role="status"], [role="alert"]')).map(
@@ -202,6 +202,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
 
     await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
     await expect(page.getByText('Eintrag in den Papierkorb verschoben')).toBeVisible();
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
     await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
     await page.getByTestId('restore-entry-button').click();
@@ -214,14 +215,15 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     );
     console.log('Electron-Restore-Toast-Diagnose', JSON.stringify(restoreToastDiagnostics));
     await expect(page.getByText('Eintrag wiederhergestellt')).toBeVisible();
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
     await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
     await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Vaulta jetzt sperren' }).click();
+    await page.getByRole('button', { name: 'Kryptris jetzt sperren' }).click();
     await expect(page.getByRole('heading', { name: 'Willkommen zurück' })).toBeVisible();
     await page.getByLabel('Master-Passwort').fill(masterPassword);
-    await page.getByRole('button', { name: 'Vaulta entsperren' }).click();
+    await page.getByRole('button', { name: 'Kryptris entsperren' }).click();
 
     await expect(page.getByPlaceholder('Tresor durchsuchen')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
@@ -286,6 +288,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
     await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
     await expect(page.getByText('Eintrag in den Papierkorb verschoben')).toBeVisible();
+    await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
     await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
     await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
@@ -334,7 +337,7 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
       timeout: 45_000,
     });
     await restoredPage.getByLabel('Master-Passwort').fill(masterPassword);
-    await restoredPage.getByRole('button', { name: 'Vaulta entsperren' }).click();
+    await restoredPage.getByRole('button', { name: 'Kryptris entsperren' }).click();
     await expect(restoredPage.getByPlaceholder('Tresor durchsuchen')).toBeVisible({
       timeout: 45_000,
     });
@@ -358,6 +361,11 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await rm(testRoot, { recursive: true, force: true });
   }
 });
+
+async function openSidebarNavigation(page: Page): Promise<void> {
+  const openButton = page.getByRole('button', { name: 'Navigation öffnen' });
+  if (await openButton.isVisible()) await openButton.click();
+}
 
 async function fillInitialSetup(page: Page, masterPassword: string): Promise<void> {
   await page.getByLabel('Name des ersten Tresors').fill('Privat');

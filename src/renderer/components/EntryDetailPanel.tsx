@@ -272,7 +272,11 @@ export function EntryDetailPanel({
         <div className="detail-header__actions">
           {detail.deletedAt ? (
             <>
-              <Button icon={<ArchiveRestore />} onClick={onRestore} data-testid="restore-entry-button">
+              <Button
+                icon={<ArchiveRestore />}
+                onClick={onRestore}
+                data-testid="restore-entry-button"
+              >
                 Wiederherstellen
               </Button>
               <Button

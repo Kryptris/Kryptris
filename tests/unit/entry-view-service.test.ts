@@ -88,7 +88,7 @@ describe('EntryViewService', () => {
   it('aktualisiert den Sicherheitsstatus nach einer Eintragsaenderung', () => {
     const scan = vi.fn(() => ({ findings: [] }));
     const service = new EntryViewService({ scan } as never);
-    const entry = credentialEntry({ id: 'changed-entry' }) as VaultEntry;
+    const entry = credentialEntry({ id: 'changed-entry' });
 
     service.list([entry], query('all'));
     service.list([{ ...entry, updatedAt: '2026-07-16T12:00:00.000Z' }], query('all'));

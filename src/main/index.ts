@@ -16,7 +16,9 @@ let closingWindow = false;
 
 app.setName('Kryptris');
 // Bestehende Vaulta-Installationen behalten ihren Datenordner nach der Umbenennung.
-app.setPath('userData', path.join(app.getPath('appData'), 'Vaulta'));
+if (process.env.VAULTA_E2E_MODE === undefined) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'Vaulta'));
+}
 app.enableSandbox();
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-component-update');

@@ -54,7 +54,7 @@ export function ImportView({
 }: {
   vaultId: string;
   notify: Notify;
-  onImported: () => void;
+  onImported: (entryIds: string[]) => void;
 }) {
   const [format, setFormat] = useState<ImportFormat>('bitwarden-json');
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -116,7 +116,7 @@ export function ImportView({
         `${String(result.skipped)} übersprungen`,
       );
       setPreview(null);
-      onImported();
+      onImported(result.entryIds);
     } catch (error: unknown) {
       notify('error', 'Import fehlgeschlagen', getErrorMessage(error));
     } finally {

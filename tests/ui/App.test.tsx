@@ -182,7 +182,7 @@ function createApi(state: AppState): VaultaApi {
       remapImport: vi.fn(async () => {
         throw new Error('In diesem Test nicht verwendet');
       }),
-      executeImport: vi.fn(async () => ({ imported: 0, skipped: 0 })),
+      executeImport: vi.fn(async () => ({ imported: 0, skipped: 0, entryIds: [] })),
       export: vi.fn(async () => null),
     },
     audit: { list: vi.fn(async () => []) },

@@ -1271,7 +1271,7 @@ export class VaultaController {
 
   public async executeImport(
     input: ImportExecuteInput,
-  ): Promise<{ imported: number; skipped: number }> {
+  ): Promise<{ imported: number; skipped: number; entryIds: string[] }> {
     this.requireUnlocked();
     if (this.importVaults.get(input.token) !== input.vaultId)
       throw new VaultaError(
@@ -1279,6 +1279,7 @@ export class VaultaController {
         'Importvorschau und Ziel-Tresor passen nicht zusammen.',
       );
     const prepared = this.importer.materialize(input.token, input.selectedRows);
+    const importedEntryIds: string[] = [];
     const imported = await this.vaults.mutateVault(input.vaultId, (document) => {
       const now = new Date().toISOString();
       const foldersByName = new Map(
@@ -1318,13 +1319,18 @@ export class VaultaController {
           lastUsedAt: null,
           deletedAt: null,
         });
+        importedEntryIds.push(entryId);
       }
       return prepared.length;
     });
     this.importer.discard(input.token);
     this.importVaults.delete(input.token);
     await this.audit.record({ type: 'import-completed', vaultId: input.vaultId });
-    return { imported, skipped: Math.max(0, input.selectedRows.length - imported) };
+    return {
+      imported,
+      skipped: Math.max(0, input.selectedRows.length - imported),
+      entryIds: importedEntryIds,
+    };
   }
 
   public async exportData(input: ExportInput): Promise<string | null> {

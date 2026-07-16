@@ -417,7 +417,10 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
               <ImportView
                 vaultId={activeVault.id}
                 notify={notify}
-                onImported={() => void loadEntries()}
+                onImported={(entryIds) => {
+                  setSelectedEntryId(entryIds[0] ?? null);
+                  void loadEntries();
+                }}
               />
             )}
             {section === 'export' && <ExportView state={state} notify={notify} />}
@@ -455,6 +458,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
           setSection('all');
           setSelectedEntryId(saved.id);
           void loadEntries();
+          void loadDetail();
         }}
       />
       <VaultManager

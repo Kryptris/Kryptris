@@ -399,7 +399,7 @@ function installSyntheticVaultaApi(mode: string) {
     transfer: {
       previewImport: () => Promise.resolve(null),
       remapImport: () => Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
-      executeImport: () => Promise.resolve({ imported: 0, skipped: 0 }),
+      executeImport: () => Promise.resolve({ imported: 0, skipped: 0, entryIds: [] }),
       export: () => Promise.resolve(null),
     },
     audit: { list: () => Promise.resolve([]) },

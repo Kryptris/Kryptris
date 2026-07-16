@@ -214,7 +214,7 @@ export interface VaultaApi {
       token: string;
       vaultId: string;
       selectedRows: number[];
-    }): Promise<{ imported: number; skipped: number }>;
+    }): Promise<{ imported: number; skipped: number; entryIds: string[] }>;
     export(input: {
       format: ExportFormat;
       vaultIds: string[];

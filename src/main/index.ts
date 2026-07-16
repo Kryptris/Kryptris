@@ -100,10 +100,16 @@ function hardenWebContents(
   const activity = new TrustedActivityReporter(onActivity);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedNavigation(url)) event.preventDefault();
+    if (!isAllowedNavigation(url)) {
+      event.preventDefault();
+      window.webContents.stop();
+    }
   });
   window.webContents.on('will-redirect', (event, url) => {
-    if (!isAllowedNavigation(url)) event.preventDefault();
+    if (!isAllowedNavigation(url)) {
+      event.preventDefault();
+      window.webContents.stop();
+    }
   });
   window.webContents.on('will-attach-webview', (event) => event.preventDefault());
   window.webContents.on('before-input-event', (event, input) => {

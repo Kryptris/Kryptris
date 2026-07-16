@@ -272,16 +272,21 @@ export function EntryDetailPanel({
         <div className="detail-header__actions">
           {detail.deletedAt ? (
             <>
-              <Button icon={<ArchiveRestore />} onClick={onRestore}>
+              <Button icon={<ArchiveRestore />} onClick={onRestore} data-testid="restore-entry-button">
                 Wiederherstellen
               </Button>
-              <Button variant="danger" icon={<Trash2 />} onClick={() => setPurgeOpen(true)}>
+              <Button
+                variant="danger"
+                icon={<Trash2 />}
+                onClick={() => setPurgeOpen(true)}
+                data-testid="purge-entry-button"
+              >
                 Endgültig löschen
               </Button>
             </>
           ) : (
             <>
-              <Button icon={<Pencil />} onClick={onEdit}>
+              <Button icon={<Pencil />} onClick={onEdit} data-testid="edit-entry-button">
                 Bearbeiten
               </Button>
               <Button

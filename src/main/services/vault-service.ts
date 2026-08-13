@@ -131,6 +131,62 @@ export function parseVaultDocumentV2(value: unknown, expectedId: string): VaultD
   return value as VaultDocument;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Repairs only the short-lived Welle-8 transition shape after the enclosing
+ * encrypted container has already authenticated. Those documents declared V2
+ * but omitted the new neutral lifecycle block from one or more pre-existing
+ * entries. Every other stored field is first accepted by the strict V1 schema;
+ * existing lifecycle values are deliberately preserved and still pass the
+ * strict V2 schema afterwards.
+ *
+ * A `null` result means that the input is not a fully repairable instance of
+ * this exact historical shape. It must then be handled by the ordinary strict
+ * parsers instead of being normalized generically.
+ */
+export function repairHistoricalV2DocumentMissingLifecycle(
+  value: unknown,
+  expectedId: string,
+): VaultDocument | null {
+  if (
+    !isRecord(value) ||
+    value.formatVersion !== VAULT_DOCUMENT_FORMAT_VERSION ||
+    !Array.isArray(value.entries) ||
+    !value.entries.every(isRecord) ||
+    !value.entries.some((entry) => !Object.hasOwn(entry, 'lifecycle'))
+  ) {
+    return null;
+  }
+
+  const legacyProjection = {
+    ...value,
+    formatVersion: LEGACY_VAULT_DOCUMENT_FORMAT_VERSION,
+    entries: value.entries.map((entry) => {
+      const legacyEntry = { ...entry };
+      delete legacyEntry.lifecycle;
+      return legacyEntry;
+    }),
+  };
+  try {
+    parseVaultDocumentV1(legacyProjection, expectedId);
+
+    const normalized = {
+      ...value,
+      entries: value.entries.map((entry) =>
+        Object.hasOwn(entry, 'lifecycle')
+          ? { ...entry }
+          : { ...entry, lifecycle: createDefaultEntryLifecycleMetadata() },
+      ),
+    };
+    return parseVaultDocumentV2(normalized, expectedId);
+  } catch {
+    return null;
+  }
+}
+
 function parseVaultKeyRegistry(value: ProtectedMetadataValue | null): VaultKeyRegistry {
   if (value === null) return {};
   if (typeof value !== 'object' || Array.isArray(value)) {
@@ -609,6 +665,47 @@ export class VaultService {
     }
   }
 
+  /**
+   * Returns the effective source version for the persistent forward migration.
+   * A strictly authenticated Welle-8 transition document (declared V2 with
+   * missing lifecycle blocks) is reported as the V1 migration source so the
+   * existing snapshot-and-rollback path rewrites it atomically. It remains
+   * invalid for normal V2 reads until that rewrite completes.
+   */
+  public async inspectDocumentMigrationVersion(
+    vaultId: string,
+    bytes: Buffer,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<number> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertAuthorized();
+    const key = await this.getVaultKey(vaultId);
+    try {
+      assertAuthorized();
+      const value = this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId);
+      const version = readVaultDocumentFormatVersion(value);
+      if (version === LEGACY_VAULT_DOCUMENT_FORMAT_VERSION) {
+        parseVaultDocumentV1(value, vaultId);
+        assertAuthorized();
+        return version;
+      }
+
+      try {
+        parseVaultDocumentV2(value, vaultId);
+        assertAuthorized();
+        return version;
+      } catch (error) {
+        if (repairHistoricalV2DocumentMissingLifecycle(value, vaultId) !== null) {
+          assertAuthorized();
+          return LEGACY_VAULT_DOCUMENT_FORMAT_VERSION;
+        }
+        throw error;
+      }
+    } finally {
+      this.crypto.erase(key);
+    }
+  }
+
   /** Accepts only a fully encrypted vault target containing the current V2 document. */
   public async validateCurrentDocumentBytes(
     vaultId: string,
@@ -630,7 +727,12 @@ export class VaultService {
     }
   }
 
-  /** Produces a complete encrypted V2 target while retaining the original V1 ciphertext. */
+  /**
+   * Produces a complete encrypted V2 target while retaining the original
+   * ciphertext. Besides genuine V1, this accepts only the authenticated
+   * historical V2 transition shape recognized by
+   * {@link repairHistoricalV2DocumentMissingLifecycle}.
+   */
   public async migrateDocumentBytesV1ToV2(
     vaultId: string,
     bytes: Buffer,
@@ -641,18 +743,31 @@ export class VaultService {
     const key = await this.getVaultKey(vaultId);
     try {
       assertAuthorized();
-      const legacy = parseVaultDocumentV1(
-        this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId),
-        vaultId,
-      );
-      const migrated: VaultDocument = {
-        ...legacy,
-        formatVersion: VAULT_DOCUMENT_FORMAT_VERSION,
-        entries: legacy.entries.map((entry) => ({
-          ...entry,
-          lifecycle: createDefaultEntryLifecycleMetadata(),
-        })),
-      };
+      const source = this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId);
+      const sourceVersion = readVaultDocumentFormatVersion(source);
+      const repairedHistoricalV2 = repairHistoricalV2DocumentMissingLifecycle(source, vaultId);
+      let migrated: VaultDocument;
+      if (repairedHistoricalV2 !== null) {
+        migrated = repairedHistoricalV2;
+      } else {
+        if (sourceVersion === VAULT_DOCUMENT_FORMAT_VERSION) {
+          parseVaultDocumentV2(source, vaultId);
+          throw new VaultaError(
+            'UNSUPPORTED_FORMAT',
+            'Der V2-Tresorinhalt benötigt keine V1-zu-V2-Migration.',
+            'Die Datei wurde nicht verändert.',
+          );
+        }
+        const legacy = parseVaultDocumentV1(source, vaultId);
+        migrated = {
+          ...legacy,
+          formatVersion: VAULT_DOCUMENT_FORMAT_VERSION,
+          entries: legacy.entries.map((entry) => ({
+            ...entry,
+            lifecycle: createDefaultEntryLifecycleMetadata(),
+          })),
+        };
+      }
       assertAuthorized();
       const target = this.containers.encodeJson(migrated, key, 'vault', vaultId);
       parseVaultDocumentV2(

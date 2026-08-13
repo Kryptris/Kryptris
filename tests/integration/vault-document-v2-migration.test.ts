@@ -96,6 +96,102 @@ describe('eingebettete VaultDocument-V2-Migration', () => {
     expect(await migrationBackups(fixture.root)).toEqual(backupsBefore);
   });
 
+  it('schreibt ein historisches V2-Zwischenformat mit fehlenden Lebenszyklen atomar neu', async () => {
+    const fixture = await createFixture();
+    const vault = await fixture.vaults.createVault('Historisch', '#14b8a6');
+    const missingLifecycle = await fixture.vaults.createEntry(
+      vault.id,
+      credentialInput('Historischer Zugang', 'Historisch-A!123'),
+    );
+    const retainedLifecycle = await fixture.vaults.createEntry(
+      vault.id,
+      credentialInput('Bereits erweitert', 'Historisch-B!123'),
+    );
+    const expectedRetainedLifecycle = {
+      rotationIntervalDays: 90,
+      nextRotationDate: '2030-01-15',
+      rotationExcluded: false,
+      twoFactorStatus: 'active' as const,
+      expiryReminderDate: null,
+    };
+    await fixture.vaults.mutateVault(vault.id, (document) => {
+      const entry = document.entries.find((candidate) => candidate.id === retainedLifecycle.id);
+      if (entry === undefined) throw new Error('Erweiterter Fixture-Eintrag fehlt.');
+      entry.lifecycle = expectedRetainedLifecycle;
+    });
+    const historical = await installHistoricalV2Document(fixture, vault.id);
+
+    await expect(
+      fixture.vaults.inspectDocumentBytes(vault.id, historical.bytes),
+    ).rejects.toMatchObject({ code: 'CORRUPT_DATA' });
+    await expect(
+      fixture.vaults.inspectDocumentMigrationVersion(vault.id, historical.bytes),
+    ).resolves.toBe(1);
+
+    const result = await migrationService(fixture).migrate();
+
+    expect(result).toMatchObject({ pendingFiles: 1, migratedFiles: 1 });
+    expect(result.backupPath).not.toBeNull();
+    fixture.vaults.clearCachedDocuments();
+    await expect(
+      fixture.vaults.inspectDocumentBytes(vault.id, await readFile(historical.filePath)),
+    ).resolves.toBe(2);
+    const migrated = await fixture.vaults.readVault(vault.id);
+    expect(migrated).toMatchObject(historical.document);
+    const migratedMissingLifecycle = migrated.entries.find(
+      (entry) => entry.id === missingLifecycle.id,
+    );
+    const migratedRetainedLifecycle = migrated.entries.find(
+      (entry) => entry.id === retainedLifecycle.id,
+    );
+    expect(migratedMissingLifecycle?.lifecycle).toEqual({
+      rotationIntervalDays: null,
+      nextRotationDate: null,
+      rotationExcluded: false,
+      twoFactorStatus: 'unknown',
+      expiryReminderDate: null,
+    });
+    expect(migratedRetainedLifecycle?.lifecycle).toEqual(expectedRetainedLifecycle);
+    expect(await migrationBackups(fixture.root)).toHaveLength(1);
+  });
+
+  it('lehnt partielle Lebenszyklen im historischen V2-Zwischenformat vor Snapshot und Write ab', async () => {
+    const fixture = await createFixture();
+    const vault = await fixture.vaults.createVault('Teilweise', '#14b8a6');
+    await fixture.vaults.createEntry(vault.id, credentialInput('Ohne Lebenszyklus', 'Ohne-A!123'));
+    await fixture.vaults.createEntry(
+      vault.id,
+      credentialInput('Teilweise Lebenszyklus', 'Teilweise-B!123'),
+    );
+    const current = await fixture.vaults.readVault(vault.id);
+    const [missingLifecycle, partialLifecycle] = current.entries;
+    if (missingLifecycle === undefined || partialLifecycle === undefined) {
+      throw new Error('Historische V2-Fixture hat zu wenige Einträge.');
+    }
+    const { lifecycle: _missingLifecycle, ...legacyEntry } = missingLifecycle;
+    void _missingLifecycle;
+    const malformed = {
+      ...current,
+      entries: [legacyEntry, { ...partialLifecycle, lifecycle: { rotationIntervalDays: null } }],
+    };
+    const filePath = vaultPath(fixture.root, vault.id);
+    await fixture.vaults.withVaultKey(vault.id, async (key) => {
+      await writeFile(
+        filePath,
+        new EncryptedContainerCodec().encodeJson(malformed, key, 'vault', vault.id),
+      );
+    });
+    fixture.vaults.clearCachedDocuments();
+    const bytesBefore = await readFile(filePath);
+
+    await expect(migrationService(fixture).migrate()).rejects.toMatchObject({
+      code: 'CORRUPT_DATA',
+    });
+
+    expect(await readFile(filePath)).toEqual(bytesBefore);
+    expect(await migrationBackups(fixture.root)).toEqual([]);
+  });
+
   it('rollt einen unterbrochenen Commit über mehrere Vaults bytegenau zurück', async () => {
     const fixture = await createFixture();
     const first = await fixture.vaults.createVault('A', '#14b8a6');
@@ -178,6 +274,10 @@ interface Fixture {
   vaults: VaultService;
 }
 
+type HistoricalV2Document = Omit<VaultDocument, 'entries'> & {
+  readonly entries: Array<VaultDocumentV1['entries'][number] | VaultDocument['entries'][number]>;
+};
+
 async function createFixture(): Promise<Fixture> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'vaulta-v2-migration-'));
   roots.push(root);
@@ -215,6 +315,29 @@ async function installLegacyDocument(
 ): Promise<{ document: VaultDocumentV1; filePath: string; bytes: Buffer }> {
   const current = await fixture.vaults.readVault(vaultId);
   const document = toLegacyDocument(current);
+  const filePath = vaultPath(fixture.root, vaultId);
+  let bytes: Buffer = Buffer.alloc(0);
+  await fixture.vaults.withVaultKey(vaultId, async (key) => {
+    bytes = new EncryptedContainerCodec().encodeJson(document, key, 'vault', vaultId);
+    await writeFile(filePath, bytes);
+  });
+  fixture.vaults.clearCachedDocuments();
+  return { document, filePath, bytes };
+}
+
+async function installHistoricalV2Document(
+  fixture: Fixture,
+  vaultId: string,
+): Promise<{ document: HistoricalV2Document; filePath: string; bytes: Buffer }> {
+  const current = await fixture.vaults.readVault(vaultId);
+  const [missingLifecycle, ...retainedEntries] = current.entries;
+  if (missingLifecycle === undefined) throw new Error('Historische V2-Fixture hat keine Einträge.');
+  const { lifecycle: _ignoredLifecycle, ...legacyEntry } = missingLifecycle;
+  void _ignoredLifecycle;
+  const document: HistoricalV2Document = {
+    ...current,
+    entries: [legacyEntry, ...retainedEntries.map((entry) => structuredClone(entry))],
+  };
   const filePath = vaultPath(fixture.root, vaultId);
   let bytes: Buffer = Buffer.alloc(0);
   await fixture.vaults.withVaultKey(vaultId, async (key) => {

@@ -9,6 +9,7 @@ import {
   parseVaultDocumentV2,
   readVaultDocumentFormatVersion,
 } from '../../src/main/services/vault-service';
+import { parseAuthenticatedVaultPackageDocument } from '../../src/main/services/vault-package-service';
 
 const fixtures = path.resolve('tests', 'fixtures', 'migrations');
 const vaultId = '10000000-0000-4000-8000-000000000001';
@@ -41,6 +42,45 @@ describe('VaultDocument V1/V2', () => {
     expect(() => parseVaultDocumentV2(extraField, vaultId)).toThrowError(
       expect.objectContaining({ code: 'CORRUPT_DATA' }),
     );
+  });
+
+  it('ergänzt nur im bereits authentifizierten Paketdecoder fehlende historische V2-Lebenszyklen', async () => {
+    const v2 = await readFixture('vault-document-v2.json');
+    const missingLifecycle = structuredClone(v2);
+    const entries = missingLifecycle.entries as Array<Record<string, unknown>>;
+    delete entries[0]?.lifecycle;
+
+    const parsed = parseAuthenticatedVaultPackageDocument(missingLifecycle);
+
+    expect(parsed.entries[0]?.lifecycle).toEqual({
+      rotationIntervalDays: null,
+      nextRotationDate: null,
+      rotationExcluded: false,
+      twoFactorStatus: 'unknown',
+      expiryReminderDate: null,
+    });
+    expect(() => parseVaultDocumentV2(missingLifecycle, vaultId)).toThrowError(
+      expect.objectContaining({ code: 'CORRUPT_DATA' }),
+    );
+  });
+
+  it('lehnt im Paketdecoder partielle oder sonst ungültige V2-Lebenszyklen weiter ab', async () => {
+    const v2 = await readFixture('vault-document-v2.json');
+    const partialLifecycle = structuredClone(v2);
+    const partialEntry = (partialLifecycle.entries as Array<Record<string, unknown>>)[0];
+    if (partialEntry === undefined) throw new Error('Fixture-Eintrag fehlt');
+    partialEntry.lifecycle = { rotationIntervalDays: null };
+
+    const extraStoredField = structuredClone(v2);
+    const entries = extraStoredField.entries as Array<Record<string, unknown>>;
+    delete entries[0]?.lifecycle;
+    entries[0]!.unrecognized = true;
+
+    for (const invalid of [partialLifecycle, extraStoredField]) {
+      expect(() => parseAuthenticatedVaultPackageDocument(invalid)).toThrowError(
+        expect.objectContaining({ code: 'CORRUPT_DATA' }),
+      );
+    }
   });
 
   it('lehnt Zukunftsversionen fail-closed ab', async () => {

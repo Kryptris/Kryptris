@@ -71,6 +71,10 @@ const EMPTY_FILTERS: EntryFilters = { types: [], tags: [], folderId: null, secur
 const ENTRY_SECTIONS: WorkspaceSection[] = ['all', 'favorites', 'recent', 'trash'];
 const ENTRY_SEARCH_DEBOUNCE_MS = 200;
 
+function sameEntryIds(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((entryId, index) => entryId === right[index]);
+}
+
 export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceProps) {
   const [section, setSection] = useState<WorkspaceSection>('all');
   const [search, setSearch] = useState('');
@@ -118,11 +122,20 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   const securityRequests = useRef(new Set<string>());
   const localReportRequest = useRef(false);
   const entryListRequestGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
+  const selectedEntryIdRef = useRef<string | null>(null);
+  const selectedEntryIdsRef = useRef<string[]>([]);
+  const activeVaultIdRef = useRef<string | null>(null);
+  const isEntrySectionRef = useRef(false);
 
   const activeVault =
     state.vaults.find((vault) => vault.id === state.activeVaultId) ?? state.vaults[0] ?? null;
   const activeVaultId = activeVault?.id ?? null;
   const isEntrySection = ENTRY_SECTIONS.includes(section);
+  selectedEntryIdRef.current = selectedEntryId;
+  selectedEntryIdsRef.current = selectedEntryIds;
+  activeVaultIdRef.current = activeVaultId;
+  isEntrySectionRef.current = isEntrySection;
   const listView: EntryView = isEntrySection ? (section as EntryView) : 'all';
   const isOffCanvasSidebar = useOffCanvasSidebar();
   const focusMode = state.settings?.focusMode === true;
@@ -131,6 +144,19 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     entryListRequestGeneration.current += 1;
     setSearch(value);
     if (immediate) setDebouncedSearch(value);
+  }, []);
+
+  const setEntrySelection = useCallback((entryIds: string[], primaryEntryId: string | null) => {
+    // Invalidate before scheduling React state so a resolved old request cannot install a
+    // detail during the selection transition.
+    const nextEntryIds = [...entryIds];
+    detailRequestGeneration.current += 1;
+    selectedEntryIdsRef.current = nextEntryIds;
+    selectedEntryIdRef.current = primaryEntryId;
+    setDetail(null);
+    setDetailLoading(primaryEntryId !== null && isEntrySectionRef.current);
+    setSelectedEntryIds(nextEntryIds);
+    setSelectedEntryId(primaryEntryId);
   }, []);
 
   useEffect(() => {
@@ -142,6 +168,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   useEffect(
     () => () => {
       entryListRequestGeneration.current += 1;
+      detailRequestGeneration.current += 1;
     },
     [],
   );
@@ -345,7 +372,9 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     if (!query) {
       if (!isCurrentRequest()) return;
       setEntries([]);
-      setSelectedEntryIds([]);
+      if (selectedEntryIdRef.current !== null || selectedEntryIdsRef.current.length > 0) {
+        setEntrySelection([], null);
+      }
       setEntriesLoading(false);
       return;
     }
@@ -355,44 +384,70 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
       const values = await window.vaulta.entries.list(query);
       if (!isCurrentRequest()) return;
       setEntries(values);
-      setSelectedEntryIds((current) =>
-        current.filter((entryId) => values.some((entry) => entry.id === entryId)),
+      const nextSelectedEntryIds = selectedEntryIdsRef.current.filter((entryId) =>
+        values.some((entry) => entry.id === entryId),
       );
-      setSelectedEntryId((current) => {
-        if (current && values.some((entry) => entry.id === current)) return current;
-        return values[0]?.id ?? null;
-      });
+      const nextSelectedEntryId =
+        selectedEntryIdRef.current !== null &&
+        values.some((entry) => entry.id === selectedEntryIdRef.current)
+          ? selectedEntryIdRef.current
+          : (values[0]?.id ?? null);
+      if (
+        !sameEntryIds(nextSelectedEntryIds, selectedEntryIdsRef.current) ||
+        nextSelectedEntryId !== selectedEntryIdRef.current
+      ) {
+        setEntrySelection(nextSelectedEntryIds, nextSelectedEntryId);
+      }
     } catch (error: unknown) {
       if (!isCurrentRequest()) return;
       notify('error', 'Einträge konnten nicht geladen werden', getErrorMessage(error));
       setEntries([]);
-      setSelectedEntryIds([]);
+      setEntrySelection([], null);
     } finally {
       if (isCurrentRequest()) setEntriesLoading(false);
     }
-  }, [debouncedSearch, notify, query, search]);
+  }, [debouncedSearch, notify, query, search, setEntrySelection]);
 
   useEffect(() => {
     void loadEntries();
   }, [loadEntries]);
 
   const loadDetail = useCallback(async () => {
-    if (!activeVaultId || !selectedEntryId) {
+    const requestGeneration = ++detailRequestGeneration.current;
+    const requestedVaultId = activeVaultId;
+    const requestedEntryId = selectedEntryId;
+    const isCurrentRequest = () =>
+      requestGeneration === detailRequestGeneration.current &&
+      activeVaultIdRef.current === requestedVaultId &&
+      selectedEntryIdRef.current === requestedEntryId &&
+      isEntrySectionRef.current;
+    if (!requestedVaultId || !requestedEntryId || !isEntrySection) {
       setDetail(null);
+      setDetailLoading(false);
       return;
     }
     setDetailLoading(true);
     try {
-      setDetail(
-        await window.vaulta.entries.getDetail({ vaultId: activeVaultId, entryId: selectedEntryId }),
-      );
+      const loaded = await window.vaulta.entries.getDetail({
+        vaultId: requestedVaultId,
+        entryId: requestedEntryId,
+      });
+      if (
+        !isCurrentRequest() ||
+        loaded.id !== requestedEntryId ||
+        loaded.vaultId !== requestedVaultId
+      ) {
+        return;
+      }
+      setDetail(loaded);
     } catch (error: unknown) {
+      if (!isCurrentRequest()) return;
       setDetail(null);
       notify('error', 'Eintrag konnte nicht geöffnet werden', getErrorMessage(error));
     } finally {
-      setDetailLoading(false);
+      if (isCurrentRequest()) setDetailLoading(false);
     }
-  }, [activeVaultId, notify, selectedEntryId]);
+  }, [activeVaultId, isEntrySection, notify, selectedEntryId]);
 
   useEffect(() => {
     if (isEntrySection) void loadDetail();
@@ -463,9 +518,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         } else if (isOffCanvasSidebar && sidebarOpen) {
           closeSidebar(true);
         } else if (selectedEntryId !== null) {
-          setSelectedEntryIds([]);
-          setSelectedEntryId(null);
-          setDetail(null);
+          setEntrySelection([], null);
         }
       }
     };
@@ -485,6 +538,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     selectedEntryId,
     sidebarOpen,
     shortcutHelpOpen,
+    setEntrySelection,
     tagManagerOpen,
     vaultManagerOpen,
     vaultPickerOpen,
@@ -508,9 +562,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
       await window.vaulta.vaults.select(vaultId);
       const next = await window.vaulta.system.getState();
       onStateChange(next);
-      setSelectedEntryId(null);
-      setSelectedEntryIds([]);
-      setDetail(null);
+      setEntrySelection([], null);
       setActiveSavedViewId(null);
       setSmartView(null);
       closeVaultPicker(true);
@@ -550,7 +602,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     if (next === 'settings') setSettingsInitialTab('security');
     setActiveSavedViewId(null);
     setSmartView(null);
-    setSelectedEntryIds([]);
+    setEntrySelection([], null);
     setSidebarOpen(false);
     if (next === 'all') {
       setFilters(EMPTY_FILTERS);
@@ -564,12 +616,27 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     setFilters({ ...EMPTY_FILTERS, types: [type] });
     setActiveSavedViewId(null);
     setSmartView(null);
-    setSelectedEntryIds([]);
+    setEntrySelection([], null);
     setSidebarOpen(false);
   };
 
   const selectedSummary = entries.find((entry) => entry.id === selectedEntryId) ?? null;
-  const toggleFavorite = async (entry = selectedSummary) => {
+  // A detail request may finish after the user has already selected another entry or
+  // switched vaults. Never render actions from that stale response: destructive
+  // operations must only be available for the currently selected entry.
+  const currentDetail =
+    detail !== null && detail.id === selectedEntryId && detail.vaultId === activeVaultId
+      ? detail
+      : null;
+  const currentDetailLoading = detailLoading;
+
+  const isCurrentDetail = (entryId: string): boolean =>
+    activeVaultId !== null &&
+    activeVaultIdRef.current === activeVaultId &&
+    selectedEntryIdRef.current === entryId &&
+    detail?.id === entryId &&
+    detail.vaultId === activeVaultId;
+  const toggleFavorite = async (entry: Pick<EntrySummary, 'id'> | null = selectedSummary) => {
     if (!entry || !activeVaultId) return;
     try {
       const favorite = await window.vaulta.entries.toggleFavorite({
@@ -586,56 +653,64 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     }
   };
 
-  const editSelected = async () => {
-    if (!activeVaultId || !selectedEntryId || !detail) return;
+  const editSelected = async (entryId: string) => {
+    if (!isCurrentDetail(entryId) || activeVaultId === null) return;
+    const vaultId = activeVaultId;
     try {
       const model = await window.vaulta.entries.getEditModel({
-        vaultId: activeVaultId,
-        entryId: selectedEntryId,
+        vaultId,
+        entryId,
       });
-      setEditor({ entryId: selectedEntryId, input: toEntryInput(model), type: model.data.type });
+      if (!isCurrentDetail(entryId)) return;
+      setEditor({ entryId, input: toEntryInput(model), type: model.data.type });
     } catch (error: unknown) {
       notify('error', 'Bearbeitungsansicht konnte nicht geöffnet werden', getErrorMessage(error));
     }
   };
 
-  const moveToTrash = async () => {
-    if (!activeVaultId || !selectedEntryId) return;
+  const moveToTrash = async (entryId: string) => {
+    if (!isCurrentDetail(entryId) || activeVaultId === null) return;
+    const vaultId = activeVaultId;
     try {
-      await window.vaulta.entries.moveToTrash({ vaultId: activeVaultId, entryId: selectedEntryId });
+      await window.vaulta.entries.moveToTrash({ vaultId, entryId });
       notify('success', 'Eintrag in den Papierkorb verschoben');
-      setSelectedEntryId(null);
-      setSelectedEntryIds([]);
-      await loadEntries();
+      if (activeVaultIdRef.current === vaultId && selectedEntryIdRef.current === entryId) {
+        setEntrySelection([], null);
+        await loadEntries();
+      }
     } catch (error: unknown) {
       notify('error', 'Eintrag konnte nicht gelöscht werden', getErrorMessage(error));
     }
   };
 
-  const restore = async () => {
-    if (!activeVaultId || !selectedEntryId) return;
+  const restore = async (entryId: string) => {
+    if (!isCurrentDetail(entryId) || activeVaultId === null) return;
+    const vaultId = activeVaultId;
     try {
-      await window.vaulta.entries.restore({ vaultId: activeVaultId, entryId: selectedEntryId });
+      await window.vaulta.entries.restore({ vaultId, entryId });
       notify('success', 'Eintrag wiederhergestellt');
-      setSelectedEntryId(null);
-      setSelectedEntryIds([]);
-      await loadEntries();
+      if (activeVaultIdRef.current === vaultId && selectedEntryIdRef.current === entryId) {
+        setEntrySelection([], null);
+        await loadEntries();
+      }
     } catch (error: unknown) {
       notify('error', 'Wiederherstellung fehlgeschlagen', getErrorMessage(error));
     }
   };
 
-  const purge = async (password: string) => {
-    if (!activeVaultId || !selectedEntryId) return;
+  const purge = async (entryId: string, password: string) => {
+    if (!isCurrentDetail(entryId) || activeVaultId === null) return;
+    const vaultId = activeVaultId;
     await window.vaulta.entries.purge({
-      vaultId: activeVaultId,
-      entryId: selectedEntryId,
+      vaultId,
+      entryId,
       masterPassword: password,
     });
     notify('success', 'Eintrag endgültig gelöscht');
-    setSelectedEntryId(null);
-    setSelectedEntryIds([]);
-    await loadEntries();
+    if (activeVaultIdRef.current === vaultId && selectedEntryIdRef.current === entryId) {
+      setEntrySelection([], null);
+      await loadEntries();
+    }
   };
 
   const openEntry = (entryId: string) => {
@@ -644,8 +719,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     setSection('all');
     setActiveSavedViewId(null);
     setSmartView(null);
-    setSelectedEntryIds([entryId]);
-    setSelectedEntryId(entryId);
+    setEntrySelection([entryId], entryId);
   };
 
   const openEntryInVault = async (vaultId: string, entryId: string) => {
@@ -659,9 +733,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
       setSection('all');
       setActiveSavedViewId(null);
       setSmartView(null);
-      setSelectedEntryIds([entryId]);
-      setSelectedEntryId(entryId);
-      setDetail(null);
+      setEntrySelection([entryId], entryId);
       setSidebarOpen(false);
     } catch (error: unknown) {
       notify('error', 'Eintrag konnte nicht geöffnet werden', getErrorMessage(error));
@@ -669,9 +741,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   };
 
   const changeSelection = (entryIds: string[], primaryEntryId: string | null) => {
-    setSelectedEntryIds(entryIds);
-    setSelectedEntryId(primaryEntryId);
-    if (primaryEntryId === null) setDetail(null);
+    setEntrySelection(entryIds, primaryEntryId);
   };
 
   const runBatch = async (action: BatchEntryAction): Promise<boolean> => {
@@ -688,9 +758,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         'success',
         `${String(result.affected)} ${result.affected === 1 ? 'Eintrag' : 'Einträge'} aktualisiert`,
       );
-      setSelectedEntryIds([]);
-      setSelectedEntryId(null);
-      setDetail(null);
+      setEntrySelection([], null);
       await Promise.all([loadEntries(), loadFolders(), loadTags(), loadSavedViews()]);
       return true;
     } catch (error: unknown) {
@@ -750,7 +818,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     });
     setSmartView(view.filters.smartView);
     setActiveSavedViewId(view.id);
-    setSelectedEntryIds([]);
+    setEntrySelection([], null);
     setSidebarOpen(false);
     if (view.invalidReferences.folder || view.invalidReferences.tags.length > 0) {
       notify(
@@ -767,7 +835,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     setFilters(EMPTY_FILTERS);
     setSmartView(view);
     setActiveSavedViewId(null);
-    setSelectedEntryIds([]);
+    setEntrySelection([], null);
     setSidebarOpen(false);
   };
 
@@ -1189,24 +1257,34 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
               onFiltersChange={(next) => {
                 setFilters(next);
                 setActiveSavedViewId(null);
-                setSelectedEntryIds([]);
+                setEntrySelection([], null);
               }}
               onSelectionChange={changeSelection}
               onNew={() => setEditor({ type: filters.types[0] ?? 'credential' })}
               onToggleFavorite={(entry) => void toggleFavorite(entry)}
             />
             <EntryDetailPanel
-              detail={detail}
-              summary={selectedSummary}
+              detail={currentDetail}
+              summary={currentDetail === null ? null : selectedSummary}
               state={state}
-              loading={detailLoading}
+              loading={currentDetailLoading}
               focusMode={focusMode}
               notify={notify}
-              onEdit={() => void editSelected()}
-              onToggleFavorite={() => void toggleFavorite()}
-              onMoveToTrash={() => void moveToTrash()}
-              onRestore={() => void restore()}
-              onPurge={purge}
+              onEdit={() => {
+                if (currentDetail) void editSelected(currentDetail.id);
+              }}
+              onToggleFavorite={() => {
+                if (currentDetail) void toggleFavorite(currentDetail);
+              }}
+              onMoveToTrash={() => {
+                if (currentDetail) void moveToTrash(currentDetail.id);
+              }}
+              onRestore={() => {
+                if (currentDetail) void restore(currentDetail.id);
+              }}
+              onPurge={(password) =>
+                currentDetail ? purge(currentDetail.id, password) : Promise.resolve()
+              }
               onReload={() => void Promise.all([loadEntries(), loadDetail()])}
               onBack={() => changeSelection([], null)}
             />
@@ -1301,8 +1379,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
                 vaultId={activeVault.id}
                 notify={notify}
                 onImported={(entryIds) => {
-                  setSelectedEntryId(entryIds[0] ?? null);
-                  setSelectedEntryIds(entryIds);
+                  setEntrySelection(entryIds, entryIds[0] ?? null);
                   void loadEntries();
                 }}
                 onOpenDuplicates={() => changeSection('quality')}
@@ -1371,10 +1448,8 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
         onSaved={(saved) => {
           setEditor(null);
           setSection('all');
-          setSelectedEntryId(saved.id);
-          setSelectedEntryIds([saved.id]);
+          setEntrySelection([saved.id], saved.id);
           void loadEntries();
-          void loadDetail();
         }}
       />
       <VaultManager

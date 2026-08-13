@@ -35,6 +35,14 @@ Mehrdatei-Transaktion installiert. Die Quell-ID, der Quell-Tresorschlüssel und 
 Attachment-Wraps werden nie übernommen. Abbruch, Authentifizierungsfehler und Schreibfehler
 löschen Staging-Daten kontrolliert und hinterlassen keinen sichtbaren Teilzustand.
 
+Für einen kurzen historischen Zwischenstand vor vollständiger Welle 8 gilt nach dieser
+Authentifizierung eine eng begrenzte Kompatibilitätsregel: Ein als V2 markierter Payload darf nur
+dann im Speicher ergänzt werden, wenn eine strikte V1-Projektion aller übrigen Felder gültig ist
+und mindestens ein Eintrag den gesamten `lifecycle`-Block vermisst. Nur diese fehlenden neutralen
+Werte werden ergänzt; vorhandene oder partielle Lifecycle-Werte bleiben unverändert und müssen die
+strikte V2-Validierung bestehen. Das Paket auf Datenträger wird dabei nie geschrieben oder
+normalisiert.
+
 Die Vorschau entschlüsselt keine Daten im Renderer. Sie erhält ausschließlich redigierte,
 authentifizierte Metadaten wie Anzahl der Einträge und Anhänge sowie einen Namenskonfliktstatus.
 Passwörter, Inhalte, Dateinamen, technische Quellpfade und Schlüssel verbleiben im Main-Prozess.

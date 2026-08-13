@@ -12,7 +12,7 @@ vermutende oder verlustbehaftete `v0 → v1`-Konvertierung.
 | --------------------------------- | ---------------- | ------------------------------------ |
 | `profile.json`                    | 1                | `parseStoredProfileHeader`           |
 | äußerer `.vaulta`-Container       | 1                | `EncryptedContainerCodec`            |
-| entschlüsselter Tresor-Payload    | 2                | `parseVaultDocument`                 |
+| entschlüsselter Tresor-Payload    | 2                | `parseVaultDocumentV2`               |
 | entschlüsseltes Audit-Dokument    | 1                | `parseAuditDocument`                 |
 | `.vatt`-Header und -Footer        | 1                | Attachment-Header-/Footer-Prüfung    |
 | natives `.vaulta-backup`          | 1                | ausschließlich `BackupService`       |
@@ -38,6 +38,23 @@ Tresorschlüssel. Sämtliche betroffenen Tresore werden gemeinsam über die best
 Snapshot-/Journal-/Rollback-Infrastruktur committed. Bereits aktuelle V2-Dateien werden weder
 erneut geschrieben noch erneut gesichert. Format 3 oder höher wird vor Snapshot und Write als
 `UNSUPPORTED_FORMAT` abgelehnt; eine Rückwärtsmigration wird nicht angeboten.
+
+### Authentifiziertes historisches V2-Zwischenformat
+
+Ein ausschließlich vor der vollständigen Welle-8-Auslieferung entstandener Zwischenstand kann
+bereits `formatVersion: 2` tragen, bei einzelnen älteren Einträgen aber noch das inzwischen
+verpflichtende `lifecycle`-Objekt vermissen lassen. Nach erfolgreicher Container- beziehungsweise
+Paket-AES-GCM-Authentifizierung erkennt Kryptris nur genau diese Form: Eine Validierungsprojektion
+entfernt sämtliche Lifecycle-Blöcke, setzt Format 1 und muss den strikten V1-Parser bestehen.
+Danach ergänzt der Main-Prozess ausschließlich die fehlenden Blöcke mit den neutralen
+V2-Standardwerten und validiert erneut mit dem strikten V2-Parser.
+
+Vorhandene Lifecycle-Werte werden dabei nie überschrieben. Partielle, semantisch ungültige oder
+sonst beschädigte Lifecycle-Werte, unbekannte Felder, abweichende IDs und Zukunftsversionen bleiben
+ohne Snapshot, Write oder Importziel fail-closed abgelehnt. Bei Live-Tresoren wird der akzeptierte
+Zwischenstand über die normale atomare Snapshot-/Rollback-Migration neu verschlüsselt; ein
+portables Paket wird nie verändert, sondern nur im Main-Prozess für diesen einzelnen Import
+normalisiert und anschließend in einen neuen Ziel-Tresor überführt.
 
 ## Start- und Migrationsreihenfolge
 

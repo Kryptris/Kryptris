@@ -55,6 +55,14 @@ Versionierung wird erst mit einem ausdrücklich freigegebenen Release vorgenomme
   dokumentiertes und anonymisiert testbares natives Exportlayout vorliegt.
 - Der Release-Artefaktscanner prüft zusätzlich Laufzeit-Caches, Berichte, Restore-/Import-Staging,
   Transaktionsartefakte und verschachtelte ZIP-/ASAR-Inhalte.
+- Der Detailabruf wird bei Auswahl- und Tresorwechseln revisionsgebunden verworfen; die E2E-Prüfung
+  bewertet Papierkorbmutationen anhand des dauerhaften Listenstatus statt eines kurzlebigen Toasts.
+
+### Behoben
+
+- Authentifizierte historische V2-Tresorinhalte ohne den damals noch nicht persistierten
+  `lifecycle`-Block werden eng begrenzt kompatibel in den atomaren V1→V2-Migrations- beziehungsweise
+  Paketimportpfad übernommen. Partielle oder sonst ungültige V2-Daten bleiben fail-closed abgelehnt.
 
 ### Sicherheit
 

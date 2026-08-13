@@ -1054,7 +1054,7 @@ export function createVaultDocumentEmbeddedMigrationAdapter(
     matches: (relativePath) => /^vaults\/[A-Za-z0-9_-]+\.vaulta$/u.test(relativePath),
     readVersion: async (filePath, relativePath, assertAuthorized) => {
       assertAuthorized();
-      const version = await vaultService.inspectDocumentBytes(
+      const version = await vaultService.inspectDocumentMigrationVersion(
         vaultIdFromRelativePath(relativePath),
         await readFile(filePath),
         assertAuthorized,
@@ -1063,7 +1063,7 @@ export function createVaultDocumentEmbeddedMigrationAdapter(
       return version;
     },
     readVersionFromBytes: (bytes, relativePath, assertAuthorized) =>
-      vaultService.inspectDocumentBytes(
+      vaultService.inspectDocumentMigrationVersion(
         vaultIdFromRelativePath(relativePath),
         bytes,
         assertAuthorized,

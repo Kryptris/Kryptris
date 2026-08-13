@@ -4,13 +4,17 @@ import { lstat, open, stat, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import { VaultaError } from '../../shared/errors';
-import type { AttachmentMetadata, VaultDocument } from '../../shared/models';
+import { type AttachmentMetadata, type VaultDocument } from '../../shared/models';
 import { CryptoService, type AesGcmEnvelope } from '../security/crypto-service';
 import { KeyDerivationService, type Argon2idParameters } from '../security/key-derivation';
 import { AtomicFileWriter } from '../storage/atomic-file';
 import { assertSafeIdentifier } from '../storage/path-safety';
 import { isSafeAttachmentPreviewMediaType, type AttachmentService } from './attachment-service';
-import { parseVaultDocumentV2, type VaultService } from './vault-service';
+import {
+  parseVaultDocumentV2,
+  repairHistoricalV2DocumentMissingLifecycle,
+  type VaultService,
+} from './vault-service';
 
 /**
  * Portable vault packages deliberately use a format which is unrelated to a
@@ -235,6 +239,34 @@ function parseJson(bytes: Buffer, message: string): unknown {
     return JSON.parse(bytes.toString('utf8')) as unknown;
   } catch (error) {
     throw new VaultaError('CORRUPT_DATA', message, null, { cause: error });
+  }
+}
+
+function readPackageDocumentId(value: unknown): string {
+  if (!isRecord(value) || typeof value.id !== 'string') {
+    throw new VaultaError('CORRUPT_DATA', 'Der Tresorinhalt im Paket ist ungueltig.');
+  }
+  assertSafeIdentifier(value.id, 'Tresor-ID');
+  return value.id;
+}
+
+/**
+ * Parses an already authenticated package payload. Early Welle-8 development
+ * packages could mark a document as V2 before they persisted the neutral
+ * lifecycle block for every older entry. The shared compatibility repair is
+ * deliberately narrower than a generic V2 normalizer: it accepts only a
+ * strict V1 projection, fills only entirely missing lifecycle properties, and
+ * still runs the final current V2 parser. Existing lifecycle values remain
+ * intact, so partial, malformed, or semantically invalid values stay rejected.
+ */
+export function parseAuthenticatedVaultPackageDocument(value: unknown): VaultDocument {
+  const expectedId = readPackageDocumentId(value);
+  try {
+    return parseVaultDocumentV2(value, expectedId);
+  } catch (error) {
+    const repaired = repairHistoricalV2DocumentMissingLifecycle(value, expectedId);
+    if (repaired !== null) return repaired;
+    throw error;
   }
 }
 
@@ -894,9 +926,8 @@ export class VaultPackageService {
         if (documentBytes === null || currentAttachment !== null || manifest === null) {
           throw new VaultaError('CORRUPT_DATA', 'Der authentifizierte Paketabschluss fehlt.');
         }
-        const document = parseVaultDocumentV2(
+        const document = parseAuthenticatedVaultPackageDocument(
           parseJson(documentBytes, 'Der Tresorinhalt im Paket ist ungueltig.'),
-          this.readDocumentId(documentBytes),
         );
         this.validatePackageDocumentReferences(document, attachments, manifest.includesAttachments);
         assertAuthorized?.();
@@ -1592,15 +1623,6 @@ export class VaultPackageService {
       );
     }
     return normalized;
-  }
-
-  private readDocumentId(bytes: Buffer): string {
-    const parsed = parseJson(bytes, 'Der Tresorinhalt im Paket ist ungueltig.');
-    if (!isRecord(parsed) || typeof parsed.id !== 'string') {
-      throw new VaultaError('CORRUPT_DATA', 'Der Tresorinhalt im Paket ist ungueltig.');
-    }
-    assertSafeIdentifier(parsed.id, 'Tresor-ID');
-    return parsed.id;
   }
 
   private nextPackageId(): string {

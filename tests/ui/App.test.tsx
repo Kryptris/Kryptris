@@ -1330,6 +1330,74 @@ describe('Vaulta Renderer', () => {
     );
   });
 
+  it('verwirft ein verspätetes Detail nach einem Auswahlwechsel und mutiert nur den aktuellen Eintrag', async () => {
+    const api = createApi(unlockedState);
+    const secondSummary: EntrySummary = {
+      ...entrySummary,
+      id: 'entry-2',
+      title: 'Zweiter synthetischer Eintrag',
+      subtitle: 'zweiter@example.test',
+      favorite: false,
+    };
+    const secondDetail: EntryDetail = {
+      ...entryDetail,
+      id: secondSummary.id,
+      title: secondSummary.title,
+      favorite: false,
+    };
+    let resolveFirstDetail: (detail: EntryDetail) => void = () => undefined;
+    let resolveSecondDetail: (detail: EntryDetail) => void = () => undefined;
+    const firstDetail = new Promise<EntryDetail>((resolve) => {
+      resolveFirstDetail = resolve;
+    });
+    const secondDetailRequest = new Promise<EntryDetail>((resolve) => {
+      resolveSecondDetail = resolve;
+    });
+    vi.mocked(api.entries.list).mockResolvedValue([entrySummary, secondSummary]);
+    vi.mocked(api.entries.getDetail).mockImplementation(({ entryId }) =>
+      entryId === entrySummary.id ? firstDetail : secondDetailRequest,
+    );
+    window.vaulta = api;
+
+    render(<App />);
+
+    await screen.findByRole('option', { name: new RegExp(entrySummary.title, 'u') });
+    await waitFor(() =>
+      expect(api.entries.getDetail).toHaveBeenCalledWith({
+        vaultId: entrySummary.vaultId,
+        entryId: entrySummary.id,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('option', { name: new RegExp(secondSummary.title, 'u') }));
+    await waitFor(() =>
+      expect(api.entries.getDetail).toHaveBeenLastCalledWith({
+        vaultId: secondSummary.vaultId,
+        entryId: secondSummary.id,
+      }),
+    );
+
+    await act(async () => {
+      resolveFirstDetail(entryDetail);
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('heading', { name: entryDetail.title })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecondDetail(secondDetail);
+      await Promise.resolve();
+    });
+    const secondPanel = await screen.findByLabelText(`Details für ${secondDetail.title}`);
+    fireEvent.click(within(secondPanel).getByRole('button', { name: 'In Papierkorb verschieben' }));
+
+    await waitFor(() =>
+      expect(api.entries.moveToTrash).toHaveBeenCalledWith({
+        vaultId: secondSummary.vaultId,
+        entryId: secondSummary.id,
+      }),
+    );
+  });
+
   it('virtualisiert 10.000 EintrÃ¤ge mit begrenztem DOM und tastaturbedienbarem Fenster', async () => {
     const state: AppState = {
       ...unlockedState,

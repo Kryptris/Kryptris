@@ -311,19 +311,30 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
 
     await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
-    await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
-    await expect(page.getByText('Eintrag in den Papierkorb verschoben')).toBeVisible();
+    const finalEntry = page.getByRole('option', { name: new RegExp(updatedTitle, 'u') });
+    await expect(finalEntry).toBeVisible({ timeout: 30_000 });
+    await finalEntry.click();
+    await expect(finalEntry).toHaveAttribute('aria-current', 'true', { timeout: 30_000 });
+    const finalDetail = page.getByLabel(`Details für ${updatedTitle}`);
+    await expect(finalDetail).toBeVisible({ timeout: 30_000 });
+    await finalDetail.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
+    await expect(finalEntry).toHaveCount(0, { timeout: 30_000 });
     await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
-    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
+    const trashedFinalEntry = page.getByRole('option', { name: new RegExp(updatedTitle, 'u') });
+    await expect(trashedFinalEntry).toBeVisible({ timeout: 30_000 });
+    await trashedFinalEntry.click();
+    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible({
+      timeout: 30_000,
+    });
     await page.getByTestId('purge-entry-button').click();
     const purgeDialog = page.getByRole('dialog', { name: 'Eintrag endgültig löschen?' });
     await purgeDialog.getByLabel('Master-Passwort').fill(masterPassword);
     await purgeDialog.getByRole('button', { name: 'Endgültig löschen', exact: true }).click();
     await expect(page.getByText('Eintrag endgültig gelöscht')).toBeVisible();
-    await expect(page.getByRole('option', { name: new RegExp(updatedTitle, 'u') })).toHaveCount(0);
+    await expect(page.getByRole('option', { name: new RegExp(updatedTitle, 'u') })).toHaveCount(0, {
+      timeout: 30_000,
+    });
 
     const sourceUrl = page.url();
     const windowCount = sourceApp.windows().length;

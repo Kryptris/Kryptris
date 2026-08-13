@@ -3,10 +3,12 @@ import type { EntryType, EntryView, SecuritySeverity } from '../shared/models';
 export type WorkspaceSection =
   | EntryView
   | 'security'
+  | 'quality'
   | 'backup'
   | 'import'
   | 'export'
   | 'audit'
+  | 'help'
   | 'settings'
   | 'templates'
   | 'reports';

@@ -1,9 +1,10 @@
-import type {
-  CustomField,
-  EntryInput,
-  EntryTemplate,
-  EntryType,
-  VaultEntry,
+import {
+  createDefaultEntryLifecycleMetadata,
+  type CustomField,
+  type EntryInput,
+  type EntryTemplate,
+  type EntryType,
+  type VaultEntry,
 } from '../shared/models';
 
 export const ENTRY_ACCENTS: Record<EntryType, string> = {
@@ -57,6 +58,7 @@ export const createEmptyEntry = (type: EntryType): EntryInput => {
     favorite: false,
     note: '',
     customFields: [] as CustomField[],
+    lifecycle: createDefaultEntryLifecycleMetadata(),
   };
 
   switch (type) {
@@ -197,4 +199,5 @@ export const toEntryInput = (entry: VaultEntry): EntryInput => ({
   note: entry.note,
   customFields: entry.customFields.map((field) => ({ ...field })),
   data: structuredClone(entry.data),
+  lifecycle: { ...entry.lifecycle },
 });

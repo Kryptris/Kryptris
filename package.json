@@ -28,6 +28,7 @@
     "make": "node scripts/clean-release.mjs && npm run build && electron-builder --win --publish never",
     "audit:prod": "pnpm audit --prod --audit-level high",
     "licenses:prod": "node scripts/check-licenses.mjs",
+    "benchmark:performance": "npm run build && node scripts/performance-benchmark.mjs",
     "security:scan-artifacts": "node scripts/scan-artifacts.mjs",
     "security:check-preload": "node scripts/check-preload-bundle.mjs",
     "security:check-fuses": "node scripts/check-fuses.cjs release/win-unpacked/Kryptris.exe release/win-arm64-unpacked/Kryptris.exe",
@@ -121,7 +122,8 @@
       "signExecutable": false
     },
     "nsis": {
-      "artifactName": "Kryptris-${version}-Setup.${ext}",
+      "artifactName": "Kryptris-${version}-${arch}-Setup.${ext}",
+      "buildUniversalInstaller": false,
       "differentialPackage": false,
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

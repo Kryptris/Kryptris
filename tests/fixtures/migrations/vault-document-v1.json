@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "id": "10000000-0000-4000-8000-000000000001",
+  "name": "Legacy Vault",
+  "color": "#14b8a6",
+  "createdAt": "2025-01-02T03:04:05.000Z",
+  "updatedAt": "2026-06-07T08:09:10.000Z",
+  "folders": [
+    {
+      "id": "20000000-0000-4000-8000-000000000001",
+      "name": "Unverändert",
+      "color": "#334155",
+      "createdAt": "2025-01-03T03:04:05.000Z"
+    }
+  ],
+  "entries": [
+    {
+      "id": "30000000-0000-4000-8000-000000000001",
+      "vaultId": "10000000-0000-4000-8000-000000000001",
+      "title": "Legacy Zugang",
+      "folderId": "20000000-0000-4000-8000-000000000001",
+      "tags": ["Legacy", "Nicht normalisieren"],
+      "favorite": true,
+      "note": "Wert und Zeitstempel bleiben unverändert.",
+      "customFields": [],
+      "attachments": [],
+      "data": {
+        "type": "credential",
+        "value": {
+          "username": "legacy@example.invalid",
+          "password": "Legacy-Secret!123",
+          "websites": ["https://legacy.example.invalid"],
+          "appNames": []
+        }
+      },
+      "createdAt": "2025-01-04T03:04:05.000Z",
+      "updatedAt": "2026-06-07T08:09:10.000Z",
+      "secretChangedAt": "2025-12-13T14:15:16.000Z",
+      "lastUsedAt": "2026-05-06T07:08:09.000Z",
+      "deletedAt": null
+    }
+  ]
+}

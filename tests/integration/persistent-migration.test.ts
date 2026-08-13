@@ -31,7 +31,7 @@ describe('Persistente Vaulta-Migrationen', () => {
     expect(PERSISTENT_FORMAT_BASELINE).toEqual({
       profileHeader: 1,
       encryptedContainer: 1,
-      vaultDocument: 1,
+      vaultDocument: 2,
       auditDocument: 1,
       attachment: 1,
     });

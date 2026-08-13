@@ -7,6 +7,7 @@ import {
   HardDrive,
   KeyRound,
   LockKeyhole,
+  Monitor,
   Plus,
   Save,
   Settings,
@@ -14,7 +15,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import type { FormEvent } from 'react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   DEFAULT_SETTINGS,
@@ -37,7 +38,16 @@ import {
   PasswordInput,
 } from './ui';
 
-type SettingsTab = 'security' | 'clipboard' | 'backup' | 'factors' | 'advanced';
+export type SettingsTab = 'security' | 'clipboard' | 'windows' | 'backup' | 'factors' | 'advanced';
+
+const SETTINGS_TAB_ORDER: SettingsTab[] = [
+  'security',
+  'clipboard',
+  'windows',
+  'backup',
+  'factors',
+  'advanced',
+];
 
 interface TotpSetup {
   setupId: string;
@@ -51,12 +61,14 @@ export function SettingsView({
   state,
   notify,
   onStateChange,
+  initialTab = 'security',
 }: {
   state: AppState;
   notify: Notify;
   onStateChange: (state: AppState) => void;
+  initialTab?: SettingsTab;
 }) {
-  const [tab, setTab] = useState<SettingsTab>('security');
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [draft, setDraft] = useState<VaultaSettings>(state.settings ?? DEFAULT_SETTINGS);
   const [savedSettings, setSavedSettings] = useState<VaultaSettings>(
     state.settings ?? DEFAULT_SETTINGS,
@@ -65,6 +77,8 @@ export function SettingsView({
   const [loading, setLoading] = useState(!state.settings);
   const [busy, setBusy] = useState(false);
   const [settingsPasswordOpen, setSettingsPasswordOpen] = useState(false);
+  const [trashRetentionAcknowledged, setTrashRetentionAcknowledged] = useState(false);
+  const [trashRetentionConfirmationError, setTrashRetentionConfirmationError] = useState(false);
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
   const [totpPasswordOpen, setTotpPasswordOpen] = useState(false);
   const [totpRemoveOpen, setTotpRemoveOpen] = useState(false);
@@ -74,11 +88,18 @@ export function SettingsView({
   const [keyRemoveId, setKeyRemoveId] = useState<string | null>(null);
   const [recoveryPasswordOpen, setRecoveryPasswordOpen] = useState(false);
   const [recovery, setRecovery] = useState<RecoveryRotationStarted | null>(null);
+  const tabRefs = useRef(new Map<SettingsTab, HTMLButtonElement>());
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   useEffect(() => {
     if (state.settings) {
       setDraft(state.settings);
       setSavedSettings(state.settings);
+      setTrashRetentionAcknowledged(false);
+      setTrashRetentionConfirmationError(false);
       return;
     }
     let active = true;
@@ -88,6 +109,8 @@ export function SettingsView({
         if (active) {
           setDraft(settings);
           setSavedSettings(settings);
+          setTrashRetentionAcknowledged(false);
+          setTrashRetentionConfirmationError(false);
         }
       })
       .catch((error: unknown) =>
@@ -117,6 +140,8 @@ export function SettingsView({
       });
       setDraft(settings);
       setSavedSettings(settings);
+      setTrashRetentionAcknowledged(false);
+      setTrashRetentionConfirmationError(false);
       onStateChange({ ...state, settings });
       notify('success', 'Einstellungen gespeichert');
       return true;
@@ -129,11 +154,40 @@ export function SettingsView({
   };
 
   const requestSave = () => {
+    const enablesTrashRetention =
+      savedSettings.trashRetentionDays === null && draft.trashRetentionDays !== null;
+    if (enablesTrashRetention && !trashRetentionAcknowledged) {
+      setTab('backup');
+      setTrashRetentionConfirmationError(true);
+      return;
+    }
     if (isSecurityWeakeningSettingsChange(savedSettings, draft)) {
       setSettingsPasswordOpen(true);
       return;
     }
     void save();
+  };
+
+  const selectTab = (next: SettingsTab, focus = false) => {
+    setTab(next);
+    if (focus) window.setTimeout(() => tabRefs.current.get(next)?.focus(), 0);
+  };
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    const currentIndex = SETTINGS_TAB_ORDER.indexOf(tab);
+    const nextIndex =
+      event.key === 'ArrowDown' || event.key === 'ArrowRight'
+        ? (currentIndex + 1) % SETTINGS_TAB_ORDER.length
+        : event.key === 'ArrowUp' || event.key === 'ArrowLeft'
+          ? (currentIndex - 1 + SETTINGS_TAB_ORDER.length) % SETTINGS_TAB_ORDER.length
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? SETTINGS_TAB_ORDER.length - 1
+              : null;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    selectTab(SETTINGS_TAB_ORDER[nextIndex]!, true);
   };
 
   if (loading)
@@ -161,44 +215,73 @@ export function SettingsView({
         </Button>
       </header>
       <div className="settings-layout">
-        <nav className="settings-tabs" aria-label="Einstellungsbereiche">
+        <nav
+          className="settings-tabs"
+          role="tablist"
+          aria-label="Einstellungsbereiche"
+          aria-orientation="vertical"
+        >
           <SettingsTabButton
             value="security"
             current={tab}
             icon={<LockKeyhole />}
             label="Sicherheit"
-            onSelect={setTab}
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
           />
           <SettingsTabButton
             value="clipboard"
             current={tab}
             icon={<Clipboard />}
             label="Zwischenablage"
-            onSelect={setTab}
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
+          />
+          <SettingsTabButton
+            value="windows"
+            current={tab}
+            icon={<Monitor />}
+            label="Windows & Sichtschutz"
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
           />
           <SettingsTabButton
             value="backup"
             current={tab}
             icon={<ArchiveRestore />}
             label="Backups"
-            onSelect={setTab}
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
           />
           <SettingsTabButton
             value="factors"
             current={tab}
             icon={<Fingerprint />}
             label="Zugang & Faktoren"
-            onSelect={setTab}
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
           />
           <SettingsTabButton
             value="advanced"
             current={tab}
             icon={<HardDrive />}
             label="Erweitert"
-            onSelect={setTab}
+            onSelect={selectTab}
+            onKeyDown={handleTabKeyDown}
+            tabRef={tabRefs}
           />
         </nav>
-        <div className="settings-content">
+        <div
+          className="settings-content"
+          role="tabpanel"
+          id={`settings-panel-${tab}`}
+          aria-labelledby={`settings-tab-${tab}`}
+        >
           {tab === 'security' && (
             <SecuritySettings
               draft={draft}
@@ -207,7 +290,27 @@ export function SettingsView({
             />
           )}
           {tab === 'clipboard' && <ClipboardSettings draft={draft} setDraft={setDraft} />}
-          {tab === 'backup' && <BackupSettings draft={draft} setDraft={setDraft} notify={notify} />}
+          {tab === 'windows' && <WindowsPrivacySettings draft={draft} setDraft={setDraft} />}
+          {tab === 'backup' && (
+            <BackupSettings
+              draft={draft}
+              setDraft={setDraft}
+              notify={notify}
+              confirmationRequired={
+                savedSettings.trashRetentionDays === null && draft.trashRetentionDays !== null
+              }
+              retentionAcknowledged={trashRetentionAcknowledged}
+              confirmationError={trashRetentionConfirmationError}
+              onRetentionAcknowledged={(acknowledged) => {
+                setTrashRetentionAcknowledged(acknowledged);
+                if (acknowledged) setTrashRetentionConfirmationError(false);
+              }}
+              onRetentionChange={() => {
+                setTrashRetentionAcknowledged(false);
+                setTrashRetentionConfirmationError(false);
+              }}
+            />
+          )}
           {tab === 'factors' && (
             <FactorsSettings
               factors={factors}
@@ -368,19 +471,32 @@ function SettingsTabButton({
   icon,
   label,
   onSelect,
+  onKeyDown,
+  tabRef,
 }: {
   value: SettingsTab;
   current: SettingsTab;
   icon: React.ReactNode;
   label: string;
-  onSelect: (value: SettingsTab) => void;
+  onSelect: (value: SettingsTab, focus?: boolean) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+  tabRef: React.MutableRefObject<Map<SettingsTab, HTMLButtonElement>>;
 }) {
   return (
     <button
       type="button"
+      ref={(element) => {
+        if (element) tabRef.current.set(value, element);
+        else tabRef.current.delete(value);
+      }}
+      id={`settings-tab-${value}`}
+      role="tab"
       className={current === value ? 'is-active' : ''}
-      aria-current={current === value ? 'page' : undefined}
+      aria-selected={current === value}
+      aria-controls={`settings-panel-${value}`}
+      tabIndex={current === value ? 0 : -1}
       onClick={() => onSelect(value)}
+      onKeyDown={onKeyDown}
     >
       {icon}
       <span>{label}</span>
@@ -503,23 +619,153 @@ function ClipboardSettings({ draft, setDraft }: DraftProps) {
       <Button icon={<Trash2 />} onClick={() => void window.vaulta.system.clearClipboard()}>
         Jetzt leeren
       </Button>
-      <div className="settings-toggle-list">
-        <Toggle
-          label="Windows-Inhaltsschutz"
-          description="Erschwert viele Bildschirmaufnahmen, kann sie aber nicht vollständig verhindern."
-          checked={draft.contentProtection}
-          onChange={(value) => setDraft((current) => ({ ...current, contentProtection: value }))}
-        />
+    </section>
+  );
+}
+
+function WindowsPrivacySettings({ draft, setDraft }: DraftProps) {
+  return (
+    <section className="settings-section settings-section--windows">
+      <header>
+        <Monitor />
+        <div>
+          <h2>Windows & Sichtschutz</h2>
+          <p>
+            Lege fest, wie Kryptris im Infobereich bleibt und welche lokalen Hinweise sichtbar sein
+            dürfen.
+          </p>
+        </div>
+      </header>
+
+      <div className="settings-subsection">
+        <h3>Fensterverhalten</h3>
+        <div className="settings-toggle-list">
+          <Toggle
+            label="Beim Minimieren in den Infobereich ausblenden"
+            description="Das Fenster wird verborgen; die Sitzung bleibt nur gemäß deiner Sperrregel geöffnet."
+            checked={draft.minimizeToTray}
+            onChange={(value) => setDraft((current) => ({ ...current, minimizeToTray: value }))}
+          />
+          <Toggle
+            label="Beim Schließen in den Infobereich ausblenden"
+            description="Beenden bleibt über das Kryptris-Menü im Infobereich möglich."
+            checked={draft.closeToTray}
+            onChange={(value) => setDraft((current) => ({ ...current, closeToTray: value }))}
+          />
+          <Toggle
+            label="Mit Windows starten"
+            description="Startet Kryptris lokal mit deiner Windows-Sitzung. Der Tresor bleibt gesperrt."
+            checked={draft.startWithWindows}
+            onChange={(value) => setDraft((current) => ({ ...current, startWithWindows: value }))}
+          />
+          <Toggle
+            label="Beim Windows-Start minimiert öffnen"
+            description="Wirkt nur zusammen mit „Mit Windows starten“ und öffnet nie einen entsperrten Tresor."
+            checked={draft.startMinimized}
+            onChange={(value) => setDraft((current) => ({ ...current, startMinimized: value }))}
+          />
+        </div>
       </div>
-      <InlineNotice kind="warning" title="Technische Grenze">
+
+      <div className="settings-subsection">
+        <h3>Sichtschutz</h3>
+        <div className="settings-toggle-list">
+          <Toggle
+            label="Windows-Inhaltsschutz"
+            description="Erschwert viele Bildschirmaufnahmen, kann sie aber nicht vollständig verhindern."
+            checked={draft.contentProtection}
+            onChange={(value) => setDraft((current) => ({ ...current, contentProtection: value }))}
+          />
+          <Toggle
+            label="Fokusmodus"
+            description="Blendet Listensubtitel, Tags und Vorschau-Aktionen aus. Dies ist kein kryptografischer Schutz."
+            checked={draft.focusMode}
+            onChange={(value) => setDraft((current) => ({ ...current, focusMode: value }))}
+          />
+          <Toggle
+            label="Reduzierte Bewegung"
+            description="Deaktiviert nicht notwendige Übergänge und Animationen auch dann, wenn Windows keine Präferenz meldet."
+            checked={draft.reducedMotion}
+            onChange={(value) => setDraft((current) => ({ ...current, reducedMotion: value }))}
+          />
+        </div>
+      </div>
+
+      <div className="settings-subsection">
+        <h3>Lokale Erinnerungen</h3>
+        <p className="settings-subsection__hint">
+          Hinweise werden nur auf diesem Gerät nach dem Entsperren erzeugt und enthalten keine
+          Geheimwerte.
+        </p>
+        <div className="settings-toggle-list">
+          <Toggle
+            label="An Passwortrotation erinnern"
+            description="Zeigt einen allgemeinen lokalen Hinweis für fällige Rotationstermine."
+            checked={draft.localReminders.rotation}
+            onChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                localReminders: { ...current.localReminders, rotation: value },
+              }))
+            }
+          />
+          <Toggle
+            label="An Ablaufdaten erinnern"
+            description="Zeigt einen allgemeinen lokalen Hinweis für hinterlegte Ablaufdaten."
+            checked={draft.localReminders.expiry}
+            onChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                localReminders: { ...current.localReminders, expiry: value },
+              }))
+            }
+          />
+          <Toggle
+            label="An Backup-Prüfungen erinnern"
+            description="Erinnert lokal an eine fällige Backup-Prüfung ohne Tresor- oder Pfadangaben."
+            checked={draft.localReminders.backup}
+            onChange={(value) =>
+              setDraft((current) => ({
+                ...current,
+                localReminders: { ...current.localReminders, backup: value },
+              }))
+            }
+          />
+        </div>
+      </div>
+
+      <InlineNotice kind="warning" title="Sichtbarkeit ist kein kryptografischer Schutz">
         Schadsoftware mit Benutzer- oder Administratorrechten, Kameras und ein manipuliertes
-        Betriebssystem können nicht vollständig abgewehrt werden.
+        Betriebssystem können Inhaltsschutz und Fokusmodus umgehen. Sperre Kryptris bei jeder
+        Abwesenheit.
       </InlineNotice>
     </section>
   );
 }
 
-function BackupSettings({ draft, setDraft, notify }: DraftProps & { notify: Notify }) {
+function BackupSettings({
+  draft,
+  setDraft,
+  notify,
+  confirmationRequired,
+  retentionAcknowledged,
+  confirmationError,
+  onRetentionAcknowledged,
+  onRetentionChange,
+}: DraftProps & {
+  notify: Notify;
+  confirmationRequired: boolean;
+  retentionAcknowledged: boolean;
+  confirmationError: boolean;
+  onRetentionAcknowledged: (acknowledged: boolean) => void;
+  onRetentionChange: () => void;
+}) {
+  const retentionConfirmationRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (confirmationError) retentionConfirmationRef.current?.focus();
+  }, [confirmationError]);
+
   const choose = async () => {
     try {
       const folder = await window.vaulta.backup.chooseFolder();
@@ -581,6 +827,76 @@ function BackupSettings({ draft, setDraft, notify }: DraftProps & { notify: Noti
             }))
           }
         />
+      </div>
+      <div className="settings-subsection">
+        <div>
+          <h3>Papierkorb-Aufbewahrung</h3>
+          <p>
+            Kryptris leert den Papierkorb standardmäßig nie automatisch. Die Prüfung läuft nur,
+            solange das Profil entsperrt ist.
+          </p>
+        </div>
+        <Field
+          label="Papierkorb automatisch leeren"
+          hint="Die Frist beginnt mit dem Verschieben eines Eintrags in den Papierkorb."
+          hintId="trash-retention-hint"
+        >
+          <select
+            value={draft.trashRetentionDays ?? ''}
+            aria-label="Papierkorb automatisch leeren"
+            aria-describedby="trash-retention-hint"
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setDraft((current) => ({
+                ...current,
+                trashRetentionDays: value === '' ? null : Number(value),
+              }));
+              onRetentionChange();
+            }}
+          >
+            <option value="">Nie automatisch löschen (Standard)</option>
+            <option value="30">Nach 30 Tagen</option>
+            <option value="90">Nach 90 Tagen</option>
+            <option value="180">Nach 180 Tagen</option>
+            <option value="365">Nach 365 Tagen</option>
+          </select>
+        </Field>
+        {draft.trashRetentionDays !== null && (
+          <InlineNotice kind="warning" title="Endgültige Löschung benötigt ein vorhandenes Backup">
+            Nach Ablauf der Frist werden betroffene Einträge endgültig gelöscht. Eine
+            Wiederherstellung ist danach nur aus einem zuvor erstellten, gültigen verschlüsselten
+            Backup möglich. Prüfe Backupziel und Sicherungsstand, bevor du diese Regel aktivierst.
+          </InlineNotice>
+        )}
+        {draft.trashRetentionDays !== null && !draft.automaticBackups && (
+          <InlineNotice kind="warning" title="Automatische Backups sind nicht aktiv">
+            Kryptris erstellt mit dieser Einstellung keine automatische Sicherung vor dem Leeren.
+            Erstelle selbst regelmäßig ein verschlüsseltes Backup oder aktiviere automatische
+            Sicherungen.
+          </InlineNotice>
+        )}
+        {confirmationRequired && (
+          <label className="retention-confirmation">
+            <input
+              ref={retentionConfirmationRef}
+              type="checkbox"
+              checked={retentionAcknowledged}
+              aria-describedby="trash-retention-confirmation-description"
+              aria-invalid={confirmationError || undefined}
+              onChange={(event) => onRetentionAcknowledged(event.currentTarget.checked)}
+            />
+            <span id="trash-retention-confirmation-description">
+              Ich habe verstanden, dass abgelaufene Papierkorb-Einträge endgültig gelöscht werden
+              und danach nur aus einem vorhandenen Backup wiederhergestellt werden können.
+            </span>
+          </label>
+        )}
+        {confirmationError && (
+          <InlineNotice kind="error" title="Bestätigung erforderlich">
+            Bestätige die Auswirkung und Backup-Abhängigkeit, bevor du die automatische
+            Papierkorb-Aufbewahrung speicherst.
+          </InlineNotice>
+        )}
       </div>
     </section>
   );
@@ -722,12 +1038,6 @@ function AdvancedSettings({ draft, setDraft }: DraftProps) {
           onChange={(value) => setDraft((current) => ({ ...current, auditRetentionDays: value }))}
         />
       </div>
-      <Toggle
-        label="Reduzierte Bewegung"
-        description="Deaktiviert nicht notwendige Übergänge und Animationen."
-        checked={draft.reducedMotion}
-        onChange={(value) => setDraft((current) => ({ ...current, reducedMotion: value }))}
-      />
       <InlineNotice kind="info">
         Fachliche Metadaten, Suchindex, Aktivitätsprotokoll und Anhangsnamen bleiben verschlüsselt.
         Diagnoseprotokolle enthalten keine Tresorinhalte.

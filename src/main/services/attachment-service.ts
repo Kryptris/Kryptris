@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open, readdir, rm, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, open, readdir, realpath, rm, stat, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 
 import { VaultaError } from '../../shared/errors';
@@ -36,6 +36,11 @@ const SAFE_PREVIEW_TYPES = new Set([
   'application/pdf',
 ]);
 
+/** The allow-list is shared by every path that creates attachment metadata. */
+export function isSafeAttachmentPreviewMediaType(mediaType: string): boolean {
+  return SAFE_PREVIEW_TYPES.has(mediaType);
+}
+
 interface AttachmentHeader {
   format: 'vaulta-attachment';
   version: typeof ATTACHMENT_VERSION;
@@ -69,6 +74,65 @@ export interface EncryptAttachmentInput {
   name?: string;
   mediaType?: string;
   maxBytes?: number;
+}
+
+/**
+ * Main-process-only input for preparing a cross-vault attachment copy.
+ * `stagingPath` must come from the internal transaction coordinator and must
+ * never be accepted from a renderer IPC request.
+ */
+export interface ReencryptAttachmentToStagingInput {
+  sourceVaultId: string;
+  sourceAttachmentId: string;
+  targetVaultId: string;
+  targetAttachmentId: string;
+  stagingPath: string;
+  name: string;
+  mediaType: string;
+  assertAuthorized: () => void;
+}
+
+/**
+ * Main-process-only package-import bridge. `contents` is the short-lived,
+ * already authenticated plaintext emitted by the package reader; it is never
+ * written as a cleartext file. The caller owns the encrypted staging file and
+ * the input buffer and must remove/erase both after its wider transaction.
+ */
+export interface EncryptAttachmentBufferToStagingInput {
+  targetVaultId: string;
+  targetAttachmentId: string;
+  stagingPath: string;
+  /** The controller-owned direct parent directory for `stagingPath`. */
+  stagingDirectory: string;
+  /** Revalidates the controller's canonical-directory capability before writes. */
+  assertStagingDirectory: () => Promise<void> | void;
+  name: string;
+  mediaType: string;
+  contents: Buffer;
+  targetVaultKey: Buffer;
+  createdAt?: string;
+  assertAuthorized: () => void;
+}
+
+export interface AuthenticatedAttachmentMetadata {
+  readonly size: number;
+  readonly sha256: string;
+}
+
+export interface StoredAttachmentReference {
+  readonly vaultId: string;
+  readonly attachmentId: string;
+}
+
+export interface StoredAttachmentInventory {
+  readonly references: StoredAttachmentReference[];
+  readonly invalidEntryCount: number;
+}
+
+export interface AttachmentIntegrityOptions {
+  readonly assertAuthorized?: () => void;
+  readonly yieldControl?: () => Promise<void>;
+  readonly yieldEveryChunks?: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -321,9 +385,377 @@ export class AttachmentService {
         size: totalBytes,
         sha256: await this.getVerifiedHash(targetPath, input.vaultId, attachmentId, vaultKey),
         createdAt: this.now().toISOString(),
-        previewable: SAFE_PREVIEW_TYPES.has(mediaType),
+        previewable: isSafeAttachmentPreviewMediaType(mediaType),
       };
     });
+  }
+
+  /**
+   * Authenticates an existing attachment chunk by chunk and immediately
+   * encrypts each plaintext chunk for another vault. The caller owns the
+   * resulting, fully verified staging file and is responsible for committing
+   * it as part of a wider transaction.
+   */
+  public async reencryptToStaging(
+    input: ReencryptAttachmentToStagingInput,
+  ): Promise<AttachmentMetadata> {
+    assertSafeIdentifier(input.sourceVaultId, 'Quell-Tresor-ID');
+    assertSafeIdentifier(input.sourceAttachmentId, 'Quell-Anhangs-ID');
+    assertSafeIdentifier(input.targetVaultId, 'Ziel-Tresor-ID');
+    assertSafeIdentifier(input.targetAttachmentId, 'Ziel-Anhangs-ID');
+    if (input.sourceAttachmentId === input.targetAttachmentId) {
+      throw new VaultaError('INVALID_INPUT', 'Die Ziel-Anhangs-ID muss neu sein.');
+    }
+    if (!path.isAbsolute(input.stagingPath)) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Staging-Pfad muss absolut sein.');
+    }
+
+    const stagingPath = path.resolve(input.stagingPath);
+    const sourcePath = this.attachmentPath(input.sourceVaultId, input.sourceAttachmentId);
+    if (this.samePath(stagingPath, sourcePath)) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Quell-Anhang darf nicht als Staging-Ziel dienen.');
+    }
+    const name = input.name.trim();
+    if (
+      name.length === 0 ||
+      name.length > 255 ||
+      [...name].some((character) => character.charCodeAt(0) < 32)
+    ) {
+      throw new VaultaError('INVALID_INPUT', 'Der Anhangsname ist ungültig.');
+    }
+    if (input.mediaType.length === 0 || input.mediaType.length > 127) {
+      throw new VaultaError('INVALID_INPUT', 'Der Medientyp des Anhangs ist ungültig.');
+    }
+
+    input.assertAuthorized();
+    let output: FileHandle | null = null;
+    let stagingCreated = false;
+    let completed = false;
+    try {
+      output = await open(
+        stagingPath,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+        0o600,
+      );
+      stagingCreated = true;
+      const metadata = await this.vaultService.withVaultKey(
+        input.sourceVaultId,
+        async (sourceVaultKey) =>
+          this.vaultService.withVaultKey(input.targetVaultId, async (targetVaultKey) => {
+            input.assertAuthorized();
+            let targetFileKey: Buffer | null = null;
+            let targetNoncePrefix: Buffer | null = null;
+            let targetHeaderBytes: Buffer | null = null;
+
+            try {
+              targetFileKey = this.crypto.randomBytes(32);
+              targetNoncePrefix = this.crypto.randomBytes(8);
+              const activeTargetFileKey = targetFileKey;
+              const activeTargetNoncePrefix = targetNoncePrefix;
+              const targetHeader: AttachmentHeader = {
+                format: 'vaulta-attachment',
+                version: ATTACHMENT_VERSION,
+                cipher: 'AES-256-GCM-CHUNKED',
+                chunkSize: this.chunkSize,
+                noncePrefix: activeTargetNoncePrefix.toString('base64'),
+                wrappedFileKey: this.crypto.wrapKey(
+                  activeTargetFileKey,
+                  targetVaultKey,
+                  `attachment:${input.targetVaultId}:${input.targetAttachmentId}:file-key`,
+                ),
+              };
+              targetHeaderBytes = Buffer.from(JSON.stringify(targetHeader), 'utf8');
+              const activeTargetHeaderBytes = targetHeaderBytes;
+              let outputPosition = 0;
+              let targetChunkCount = 0;
+
+              outputPosition = await writeAll(output!, ATTACHMENT_MAGIC, outputPosition);
+              const headerLength = Buffer.allocUnsafe(4);
+              try {
+                headerLength.writeUInt32BE(targetHeaderBytes.length);
+                outputPosition = await writeAll(output!, headerLength, outputPosition);
+              } finally {
+                this.crypto.erase(headerLength);
+              }
+              outputPosition = await writeAll(output!, activeTargetHeaderBytes, outputPosition);
+              input.assertAuthorized();
+
+              const sourceFooter = await this.decryptAndVerify(
+                sourcePath,
+                input.sourceVaultId,
+                input.sourceAttachmentId,
+                sourceVaultKey,
+                async (chunk) => {
+                  for (let offset = 0; offset < chunk.length; offset += this.chunkSize) {
+                    input.assertAuthorized();
+                    outputPosition = await this.writeRecord(
+                      output!,
+                      outputPosition,
+                      DATA_RECORD,
+                      targetChunkCount,
+                      chunk.subarray(offset, offset + this.chunkSize),
+                      activeTargetFileKey,
+                      activeTargetNoncePrefix,
+                      activeTargetHeaderBytes,
+                    );
+                    targetChunkCount += 1;
+                    input.assertAuthorized();
+                  }
+                },
+                input.assertAuthorized,
+              );
+              input.assertAuthorized();
+
+              const targetFooter: AttachmentFooter = {
+                formatVersion: ATTACHMENT_VERSION,
+                chunkCount: targetChunkCount,
+                totalBytes: sourceFooter.totalBytes,
+                sha256: sourceFooter.sha256,
+              };
+              const targetFooterBytes = Buffer.from(JSON.stringify(targetFooter), 'utf8');
+              try {
+                outputPosition = await this.writeRecord(
+                  output!,
+                  outputPosition,
+                  FOOTER_RECORD,
+                  targetChunkCount,
+                  targetFooterBytes,
+                  activeTargetFileKey,
+                  activeTargetNoncePrefix,
+                  activeTargetHeaderBytes,
+                );
+              } finally {
+                this.crypto.erase(targetFooterBytes);
+              }
+              input.assertAuthorized();
+              await output!.truncate(outputPosition);
+              await output!.sync();
+              await output!.close();
+              output = null;
+              input.assertAuthorized();
+
+              const verifiedFooter = await this.decryptAndVerify(
+                stagingPath,
+                input.targetVaultId,
+                input.targetAttachmentId,
+                targetVaultKey,
+                () => input.assertAuthorized(),
+                input.assertAuthorized,
+              );
+              input.assertAuthorized();
+              if (
+                verifiedFooter.totalBytes !== sourceFooter.totalBytes ||
+                verifiedFooter.sha256 !== sourceFooter.sha256
+              ) {
+                throw new VaultaError(
+                  'CORRUPT_DATA',
+                  'Der neu verschlüsselte Anhang stimmt nicht mit der Quelle überein.',
+                );
+              }
+
+              return {
+                id: input.targetAttachmentId,
+                name,
+                mediaType: input.mediaType,
+                size: verifiedFooter.totalBytes,
+                sha256: verifiedFooter.sha256,
+                createdAt: this.now().toISOString(),
+                previewable: isSafeAttachmentPreviewMediaType(input.mediaType),
+              };
+            } finally {
+              this.crypto.erase(targetFileKey);
+              this.crypto.erase(targetNoncePrefix);
+              this.crypto.erase(targetHeaderBytes);
+            }
+          }),
+      );
+      input.assertAuthorized();
+      completed = true;
+      return metadata;
+    } finally {
+      await output?.close().catch(() => undefined);
+      if (!completed && stagingCreated) await rm(stagingPath, { force: true });
+    }
+  }
+
+  /**
+   * Writes a new encrypted attachment directly from a verified Main-process
+   * buffer into an exclusive staging path. Unlike `encryptFile`, this path
+   * never creates a cleartext filesystem artifact and does not publish the
+   * attachment before the caller's multi-file transaction has committed.
+   */
+  public async encryptBufferToStaging(
+    input: EncryptAttachmentBufferToStagingInput,
+  ): Promise<AttachmentMetadata> {
+    assertSafeIdentifier(input.targetVaultId, 'Ziel-Tresor-ID');
+    assertSafeIdentifier(input.targetAttachmentId, 'Ziel-Anhangs-ID');
+    if (!path.isAbsolute(input.stagingPath)) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Staging-Pfad muss absolut sein.');
+    }
+    if (input.targetVaultKey.length !== 32) {
+      throw new VaultaError('INVALID_INPUT', 'Der Ziel-Tresorschluessel ist ungueltig.');
+    }
+    const stagingPath = path.resolve(input.stagingPath);
+    const stagingDirectory = path.resolve(input.stagingDirectory);
+    if (
+      path.dirname(stagingPath) !== stagingDirectory ||
+      path.basename(stagingPath) !== `${input.targetAttachmentId}.vatt`
+    ) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Pfad ist nicht controller-eigen.');
+    }
+    if (
+      this.samePath(stagingPath, this.attachmentPath(input.targetVaultId, input.targetAttachmentId))
+    ) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Staging-Pfad darf kein Live-Anhang sein.');
+    }
+    const name = input.name.trim();
+    if (
+      name.length === 0 ||
+      name.length > 255 ||
+      [...name].some((character) => character.charCodeAt(0) < 32)
+    ) {
+      throw new VaultaError('INVALID_INPUT', 'Der Anhangsname ist ungueltig.');
+    }
+    if (input.mediaType.length === 0 || input.mediaType.length > 127) {
+      throw new VaultaError('INVALID_INPUT', 'Der Medientyp des Anhangs ist ungueltig.');
+    }
+    if (input.contents.length > this.defaultMaxBytes) {
+      throw new VaultaError('FILE_TOO_LARGE', 'Der Paket-Anhang ueberschreitet das Groessenlimit.');
+    }
+    const createdAt = input.createdAt ?? this.now().toISOString();
+    if (!Number.isFinite(Date.parse(createdAt))) {
+      throw new VaultaError('INVALID_INPUT', 'Der Anhangszeitpunkt ist ungueltig.');
+    }
+
+    input.assertAuthorized();
+    let output: FileHandle | null = null;
+    let fileKey: Buffer | null = null;
+    let noncePrefix: Buffer | null = null;
+    let headerBytes: Buffer | null = null;
+    try {
+      await this.assertOwnedPackageStagingDirectory(stagingDirectory, input.assertStagingDirectory);
+      input.assertAuthorized();
+      output = await open(
+        stagingPath,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
+        0o600,
+      );
+      await this.assertOpenedPackageStagingFile(
+        output,
+        stagingPath,
+        stagingDirectory,
+        input.assertStagingDirectory,
+      );
+      input.assertAuthorized();
+      fileKey = this.crypto.randomBytes(32);
+      noncePrefix = this.crypto.randomBytes(8);
+      const header: AttachmentHeader = {
+        format: 'vaulta-attachment',
+        version: ATTACHMENT_VERSION,
+        cipher: 'AES-256-GCM-CHUNKED',
+        chunkSize: this.chunkSize,
+        noncePrefix: noncePrefix.toString('base64'),
+        wrappedFileKey: this.crypto.wrapKey(
+          fileKey,
+          input.targetVaultKey,
+          `attachment:${input.targetVaultId}:${input.targetAttachmentId}:file-key`,
+        ),
+      };
+      headerBytes = Buffer.from(JSON.stringify(header), 'utf8');
+      let outputPosition = 0;
+      outputPosition = await writeAll(output, ATTACHMENT_MAGIC, outputPosition);
+      const headerLength = Buffer.allocUnsafe(4);
+      try {
+        headerLength.writeUInt32BE(headerBytes.length);
+        outputPosition = await writeAll(output, headerLength, outputPosition);
+      } finally {
+        this.crypto.erase(headerLength);
+      }
+      outputPosition = await writeAll(output, headerBytes, outputPosition);
+
+      const hash = createHash('sha256');
+      let chunkCount = 0;
+      for (let offset = 0; offset < input.contents.length; offset += this.chunkSize) {
+        input.assertAuthorized();
+        const chunk = input.contents.subarray(
+          offset,
+          Math.min(offset + this.chunkSize, input.contents.length),
+        );
+        hash.update(chunk);
+        outputPosition = await this.writeRecord(
+          output,
+          outputPosition,
+          DATA_RECORD,
+          chunkCount,
+          chunk,
+          fileKey,
+          noncePrefix,
+          headerBytes,
+        );
+        chunkCount += 1;
+      }
+      const footer: AttachmentFooter = {
+        formatVersion: ATTACHMENT_VERSION,
+        chunkCount,
+        totalBytes: input.contents.length,
+        sha256: hash.digest('hex'),
+      };
+      const footerBytes = Buffer.from(JSON.stringify(footer), 'utf8');
+      try {
+        outputPosition = await this.writeRecord(
+          output,
+          outputPosition,
+          FOOTER_RECORD,
+          chunkCount,
+          footerBytes,
+          fileKey,
+          noncePrefix,
+          headerBytes,
+        );
+      } finally {
+        this.crypto.erase(footerBytes);
+      }
+      input.assertAuthorized();
+      await output.truncate(outputPosition);
+      await output.sync();
+      input.assertAuthorized();
+
+      // Verify through the already validated descriptor. A later pathname swap
+      // cannot redirect either the ciphertext verification or future writes.
+      const verified = await this.decryptAndVerifyHandle(
+        output,
+        input.targetVaultId,
+        input.targetAttachmentId,
+        input.targetVaultKey,
+        () => input.assertAuthorized(),
+        input.assertAuthorized,
+      );
+      if (verified.totalBytes !== input.contents.length || verified.sha256 !== footer.sha256) {
+        throw new VaultaError(
+          'CORRUPT_DATA',
+          'Der verschluesselte Paket-Anhang stimmt nicht mit dem geprueften Inhalt ueberein.',
+        );
+      }
+      await output.close();
+      output = null;
+      return {
+        id: input.targetAttachmentId,
+        name,
+        mediaType: input.mediaType,
+        size: verified.totalBytes,
+        sha256: verified.sha256,
+        createdAt,
+        previewable: isSafeAttachmentPreviewMediaType(input.mediaType),
+      };
+    } finally {
+      await output?.close().catch(() => undefined);
+      this.crypto.erase(fileKey);
+      this.crypto.erase(noncePrefix);
+      this.crypto.erase(headerBytes);
+      // Do not unlink by a later pathname here. The controller owns staging
+      // cleanup and revalidates its directory/file identities before removal;
+      // doing it here could delete a path swapped after this handle closed.
+    }
   }
 
   public async decryptToFile(
@@ -389,6 +821,172 @@ export class AttachmentService {
 
   public async verify(vaultId: string, attachmentId: string): Promise<void> {
     await this.inspectStoredFormatVersion(vaultId, attachmentId);
+  }
+
+  /**
+   * Authenticates an encrypted attachment and binds the verified footer to the
+   * metadata stored in the vault document. Coordinators use this before a
+   * merge so a stale or forged size/hash pair cannot be committed.
+   */
+  public async verifyMetadata(
+    vaultId: string,
+    metadata: AttachmentMetadata,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<void> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertSafeIdentifier(metadata.id, 'Anhangs-ID');
+    if (
+      !Number.isSafeInteger(metadata.size) ||
+      metadata.size < 0 ||
+      !/^[a-f0-9]{64}$/u.test(metadata.sha256)
+    ) {
+      throw new VaultaError('CORRUPT_DATA', 'Die Anhangsmetadaten sind ungültig.');
+    }
+
+    const footer = await this.readAuthenticatedMetadata(vaultId, metadata.id, assertAuthorized);
+    assertAuthorized();
+    if (footer.size !== metadata.size || footer.sha256 !== metadata.sha256) {
+      throw new VaultaError(
+        'CORRUPT_DATA',
+        'Anhangsmetadaten und authentifizierter Dateiinhalt stimmen nicht überein.',
+      );
+    }
+  }
+
+  /** Returns only authenticated technical footer values for Main-process consistency checks. */
+  public async readAuthenticatedMetadata(
+    vaultId: string,
+    attachmentId: string,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<AuthenticatedAttachmentMetadata> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertSafeIdentifier(attachmentId, 'Anhangs-ID');
+    assertAuthorized();
+    const footer = await this.vaultService.withVaultKey(vaultId, async (vaultKey) => {
+      assertAuthorized();
+      return await this.decryptAndVerify(
+        this.attachmentPath(vaultId, attachmentId),
+        vaultId,
+        attachmentId,
+        vaultKey,
+        () => assertAuthorized(),
+        assertAuthorized,
+      );
+    });
+    assertAuthorized();
+    return { size: footer.totalBytes, sha256: footer.sha256 };
+  }
+
+  /**
+   * Authenticates every encrypted chunk and yields regularly so an immediate
+   * lock can invalidate the caller's authorization epoch.
+   */
+  public async inspectIntegrity(
+    vaultId: string,
+    attachmentId: string,
+    options: AttachmentIntegrityOptions = {},
+  ): Promise<AuthenticatedAttachmentMetadata> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertSafeIdentifier(attachmentId, 'Anhangs-ID');
+    const assertAuthorized = options.assertAuthorized ?? (() => undefined);
+    const yieldControl =
+      options.yieldControl ?? (() => new Promise<void>((resolve) => setImmediate(resolve)));
+    const yieldEveryChunks = options.yieldEveryChunks ?? 1;
+    if (
+      !Number.isSafeInteger(yieldEveryChunks) ||
+      yieldEveryChunks < 1 ||
+      yieldEveryChunks > 1_024
+    ) {
+      throw new VaultaError('INVALID_INPUT', 'Das Intervall der Integritätsprüfung ist ungültig.');
+    }
+
+    assertAuthorized();
+    let processedChunks = 0;
+    const footer = await this.vaultService.withVaultKey(vaultId, async (vaultKey) => {
+      assertAuthorized();
+      return await this.decryptAndVerify(
+        this.attachmentPath(vaultId, attachmentId),
+        vaultId,
+        attachmentId,
+        vaultKey,
+        async () => {
+          assertAuthorized();
+          processedChunks += 1;
+          if (processedChunks % yieldEveryChunks === 0) {
+            await yieldControl();
+            assertAuthorized();
+          }
+        },
+        assertAuthorized,
+      );
+    });
+    assertAuthorized();
+    return { size: footer.totalBytes, sha256: footer.sha256 };
+  }
+
+  /**
+   * Enumerates identifier-only storage references. Invalid entries are counted
+   * without exposing their directory or file names to callers.
+   */
+  public async inspectStoredAttachmentInventory(
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<StoredAttachmentInventory> {
+    const references: StoredAttachmentReference[] = [];
+    const seen = new Set<string>();
+    let invalidEntryCount = 0;
+    assertAuthorized();
+    const directories = await readdir(this.attachmentsDir, { withFileTypes: true }).catch(
+      (error) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+        throw error;
+      },
+    );
+    for (const directory of directories) {
+      assertAuthorized();
+      if (!directory.isDirectory() || !/^[A-Za-z0-9_-]+$/u.test(directory.name)) {
+        invalidEntryCount += 1;
+        continue;
+      }
+      const files = await readdir(resolveInside(this.attachmentsDir, directory.name), {
+        withFileTypes: true,
+      });
+      for (const file of files) {
+        assertAuthorized();
+        if (!file.isFile() || !/^[A-Za-z0-9_-]+\.vatt$/u.test(file.name)) {
+          invalidEntryCount += 1;
+          continue;
+        }
+        const reference = {
+          vaultId: directory.name,
+          attachmentId: file.name.slice(0, -'.vatt'.length),
+        };
+        const key = `${reference.vaultId}/${reference.attachmentId}`;
+        if (seen.has(key)) {
+          invalidEntryCount += 1;
+          continue;
+        }
+        seen.add(key);
+        references.push(reference);
+      }
+    }
+    assertAuthorized();
+    references.sort(
+      (left, right) =>
+        left.vaultId.localeCompare(right.vaultId, 'en') ||
+        left.attachmentId.localeCompare(right.attachmentId, 'en'),
+    );
+    return { references, invalidEntryCount };
+  }
+
+  /** Enumerates identifier-only storage references; paths never leave the Main process. */
+  public async listStoredAttachmentReferences(
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<StoredAttachmentReference[]> {
+    const inventory = await this.inspectStoredAttachmentInventory(assertAuthorized);
+    if (inventory.invalidEntryCount > 0) {
+      throw new VaultaError('CONFLICT', 'Der Anhangsspeicher enthält einen ungültigen Stand.');
+    }
+    return inventory.references;
   }
 
   public async validateStorageConsistency(
@@ -480,6 +1078,83 @@ export class AttachmentService {
     return this.attachmentPath(vaultId, attachmentId);
   }
 
+  /**
+   * A package import receives its path only from the controller, but an
+   * untrusted same-user process can still attempt to exchange a directory for
+   * a junction between checks. Require both the controller capability and a
+   * direct canonical directory before a new descriptor is opened.
+   */
+  private async assertOwnedPackageStagingDirectory(
+    stagingDirectory: string,
+    assertStagingDirectory: () => Promise<void> | void,
+  ): Promise<void> {
+    await assertStagingDirectory();
+    const initial = await lstat(stagingDirectory).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
+    if (initial.isSymbolicLink() || !initial.isDirectory()) {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.');
+    }
+    const canonical = await realpath(stagingDirectory).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
+    const current = await lstat(stagingDirectory).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
+    if (
+      current.isSymbolicLink() ||
+      !current.isDirectory() ||
+      !this.sameFilesystemIdentity(initial, current) ||
+      !this.samePath(canonical, stagingDirectory)
+    ) {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis wurde ausgetauscht.');
+    }
+    await assertStagingDirectory();
+  }
+
+  /**
+   * O_EXCL prevents replacement of an existing file; O_NOFOLLOW plus this
+   * descriptor/path identity comparison ensures no bytes are written until the
+   * just-opened handle is proven to still name a file below the owned stage.
+   */
+  private async assertOpenedPackageStagingFile(
+    output: FileHandle,
+    stagingPath: string,
+    stagingDirectory: string,
+    assertStagingDirectory: () => Promise<void> | void,
+  ): Promise<void> {
+    const opened = await output.stat();
+    if (!opened.isFile()) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang ist keine regulaere Datei.');
+    }
+    await this.assertOwnedPackageStagingDirectory(stagingDirectory, assertStagingDirectory);
+    const current = await lstat(stagingPath).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
+    const canonical = await realpath(stagingPath).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
+    if (
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      !this.sameFilesystemIdentity(opened, current) ||
+      !this.samePath(canonical, stagingPath)
+    ) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang wurde ausgetauscht.');
+    }
+    await this.assertOwnedPackageStagingDirectory(stagingDirectory, assertStagingDirectory);
+  }
+
   private async writeRecord(
     output: FileHandle,
     position: number,
@@ -493,26 +1168,38 @@ export class AttachmentService {
     if (index >= 0xffffffff) {
       throw new VaultaError('FILE_TOO_LARGE', 'Der Anhang enthält zu viele Chunks.');
     }
-    const nonce = this.recordNonce(noncePrefix, index);
-    const envelope = this.crypto.encryptWithNonce(
-      plaintext,
-      fileKey,
-      this.recordAad(headerBytes, type, index),
-      nonce,
-    );
-    const ciphertext = Buffer.from(envelope.ciphertext, 'base64');
-    const tag = Buffer.from(envelope.tag, 'base64');
-    const recordHeader = Buffer.allocUnsafe(RECORD_HEADER_BYTES);
-    recordHeader.writeUInt8(type, 0);
-    recordHeader.writeUInt32BE(index, 1);
-    recordHeader.writeUInt32BE(ciphertext.length, 5);
-    let next = await writeAll(output, recordHeader, position);
-    next = await writeAll(output, tag, next);
-    next = await writeAll(output, ciphertext, next);
-    this.crypto.erase(ciphertext);
-    this.crypto.erase(tag);
-    this.crypto.erase(nonce);
-    return next;
+    let nonce: Buffer | null = null;
+    let aad: Buffer | null = null;
+    let ciphertext: Buffer | null = null;
+    let tag: Buffer | null = null;
+    let recordHeader: Buffer | null = null;
+    try {
+      nonce = this.recordNonce(noncePrefix, index);
+      aad = this.recordAad(headerBytes, type, index);
+      const envelope = this.crypto.encryptWithNonce(plaintext, fileKey, aad, nonce);
+      ciphertext = Buffer.from(envelope.ciphertext, 'base64');
+      tag = Buffer.from(envelope.tag, 'base64');
+      recordHeader = Buffer.allocUnsafe(RECORD_HEADER_BYTES);
+      recordHeader.writeUInt8(type, 0);
+      recordHeader.writeUInt32BE(index, 1);
+      recordHeader.writeUInt32BE(ciphertext.length, 5);
+      let next = await writeAll(output, recordHeader, position);
+      next = await writeAll(output, tag, next);
+      return await writeAll(output, ciphertext, next);
+    } finally {
+      this.crypto.erase(recordHeader);
+      this.crypto.erase(ciphertext);
+      this.crypto.erase(tag);
+      this.crypto.erase(aad);
+      this.crypto.erase(nonce);
+    }
+  }
+
+  private sameFilesystemIdentity(
+    left: { readonly dev: number; readonly ino: number },
+    right: { readonly dev: number; readonly ino: number },
+  ): boolean {
+    return left.dev === right.dev && left.ino === right.ino;
   }
 
   private async decryptAndVerify(
@@ -521,15 +1208,43 @@ export class AttachmentService {
     attachmentId: string,
     vaultKey: Buffer,
     consume: (chunk: Buffer) => Promise<void> | void,
+    assertAuthorized: () => void = () => undefined,
   ): Promise<AttachmentFooter> {
+    assertAuthorized();
     const input = await open(filePath, constants.O_RDONLY).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new VaultaError('NOT_FOUND', 'Der verschlüsselte Anhang wurde nicht gefunden.');
       }
       throw error;
     });
-    let fileKey: Buffer | null = null;
     try {
+      return await this.decryptAndVerifyHandle(
+        input,
+        vaultId,
+        attachmentId,
+        vaultKey,
+        consume,
+        assertAuthorized,
+      );
+    } finally {
+      await input.close().catch(() => undefined);
+    }
+  }
+
+  /** Verifies an attachment through an already opened, caller-owned descriptor. */
+  private async decryptAndVerifyHandle(
+    input: FileHandle,
+    vaultId: string,
+    attachmentId: string,
+    vaultKey: Buffer,
+    consume: (chunk: Buffer) => Promise<void> | void,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<AttachmentFooter> {
+    let fileKey: Buffer | null = null;
+    let headerBytes: Buffer | null = null;
+    let noncePrefix: Buffer | null = null;
+    try {
+      assertAuthorized();
       const fileInfo = await input.stat();
       const magic = await readExact(input, ATTACHMENT_MAGIC.length, 0);
       if (!this.crypto.equals(magic, ATTACHMENT_MAGIC)) {
@@ -541,7 +1256,7 @@ export class AttachmentService {
         throw new VaultaError('CORRUPT_DATA', 'Der Anhangsheader ist ungültig.');
       }
       const headerPosition = ATTACHMENT_MAGIC.length + 4;
-      const headerBytes = await readExact(input, headerLength, headerPosition);
+      headerBytes = await readExact(input, headerLength, headerPosition);
       let parsed: unknown;
       try {
         parsed = JSON.parse(headerBytes.toString('utf8')) as unknown;
@@ -556,7 +1271,7 @@ export class AttachmentService {
         vaultKey,
         `attachment:${vaultId}:${attachmentId}:file-key`,
       );
-      const noncePrefix = Buffer.from(header.noncePrefix, 'base64');
+      noncePrefix = Buffer.from(header.noncePrefix, 'base64');
       const hash = createHash('sha256');
       let position = headerPosition + headerLength;
       let expectedIndex = 0;
@@ -564,6 +1279,7 @@ export class AttachmentService {
       let footer: AttachmentFooter | null = null;
 
       while (position < fileInfo.size) {
+        assertAuthorized();
         const recordHeader = await readExact(input, RECORD_HEADER_BYTES, position);
         position += RECORD_HEADER_BYTES;
         const type = recordHeader.readUInt8(0);
@@ -581,21 +1297,21 @@ export class AttachmentService {
         const ciphertext = await readExact(input, ciphertextLength, position);
         position += ciphertextLength;
         const nonce = this.recordNonce(noncePrefix, index);
-        const plaintext = this.crypto.decrypt(
-          {
-            algorithm: 'AES-256-GCM',
-            nonce: nonce.toString('base64'),
-            ciphertext: ciphertext.toString('base64'),
-            tag: tag.toString('base64'),
-          },
-          fileKey,
-          this.recordAad(headerBytes, type, index),
-        );
-        this.crypto.erase(ciphertext);
-        this.crypto.erase(tag);
-        this.crypto.erase(nonce);
+        const aad = this.recordAad(headerBytes, type, index);
+        let plaintext: Buffer | null = null;
 
         try {
+          plaintext = this.crypto.decrypt(
+            {
+              algorithm: 'AES-256-GCM',
+              nonce: nonce.toString('base64'),
+              ciphertext: ciphertext.toString('base64'),
+              tag: tag.toString('base64'),
+            },
+            fileKey,
+            aad,
+          );
+          assertAuthorized();
           if (type === DATA_RECORD) {
             hash.update(plaintext);
             totalBytes += plaintext.length;
@@ -631,16 +1347,23 @@ export class AttachmentService {
           }
         } finally {
           this.crypto.erase(plaintext);
+          this.crypto.erase(ciphertext);
+          this.crypto.erase(tag);
+          this.crypto.erase(nonce);
+          this.crypto.erase(aad);
+          this.crypto.erase(recordHeader);
         }
       }
 
       if (footer === null) {
         throw new VaultaError('CORRUPT_DATA', 'Der authentifizierte Anhangsabschluss fehlt.');
       }
+      assertAuthorized();
       return footer;
     } finally {
+      this.crypto.erase(noncePrefix);
+      this.crypto.erase(headerBytes);
       this.crypto.erase(fileKey);
-      await input.close();
     }
   }
 
@@ -682,5 +1405,11 @@ export class AttachmentService {
     assertSafeIdentifier(vaultId, 'Tresor-ID');
     assertSafeIdentifier(attachmentId, 'Anhangs-ID');
     return resolveInside(this.attachmentsDir, vaultId, `${attachmentId}.vatt`);
+  }
+
+  private samePath(left: string, right: string): boolean {
+    const normalize = (value: string): string =>
+      process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+    return normalize(left) === normalize(right);
   }
 }

@@ -15,6 +15,7 @@ import { useEffect, useState } from 'react';
 import {
   ENTRY_TYPE_LABELS,
   ENTRY_TYPES,
+  createDefaultEntryLifecycleMetadata,
   type CustomField,
   type CustomFieldType,
   type EntryInput,
@@ -220,6 +221,8 @@ export function EntryEditor({
             onOpenGenerator={() => setGeneratorOpen(true)}
           />
 
+          <LifecycleFields entry={entry} mutate={mutate} />
+
           <section className="editor-section">
             <header>
               <div>
@@ -325,6 +328,116 @@ export function EntryEditor({
         }}
       />
     </>
+  );
+}
+
+function LifecycleFields({
+  entry,
+  mutate,
+}: {
+  entry: EntryInput;
+  mutate: (mutator: EntryMutator) => void;
+}) {
+  const lifecycle = entry.lifecycle ?? createDefaultEntryLifecycleMetadata();
+  const supportsExpiry = ['credit-card', 'software-license', 'file'].includes(entry.data.type);
+  if (entry.data.type !== 'credential' && !supportsExpiry) return null;
+
+  const ensureLifecycle = (draft: EntryInput) =>
+    (draft.lifecycle ??= createDefaultEntryLifecycleMetadata());
+
+  return (
+    <EditorSection
+      title="Lebenszyklus"
+      description="Lokale Erinnerungen ohne Passwort- oder Geheimnishistorie"
+    >
+      {entry.data.type === 'credential' && (
+        <>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={lifecycle.rotationExcluded}
+              onChange={(event) => {
+                const excluded = event.currentTarget.checked;
+                mutate((draft) => {
+                  const next = ensureLifecycle(draft);
+                  next.rotationExcluded = excluded;
+                  if (excluded) {
+                    next.rotationIntervalDays = null;
+                    next.nextRotationDate = null;
+                  }
+                });
+              }}
+            />
+            <span>
+              <strong>Bewusst von Rotation ausnehmen</strong>
+              <small>Der Eintrag erscheint dann nicht als „Rotation fällig“.</small>
+            </span>
+          </label>
+          {!lifecycle.rotationExcluded && (
+            <div className="form-grid form-grid--two">
+              <Field label="Rotationsintervall (Tage)" hint="Leer bedeutet: keine Erinnerung.">
+                <input
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={lifecycle.rotationIntervalDays ?? ''}
+                  onChange={(event) => {
+                    const raw = event.currentTarget.value;
+                    mutate((draft) => {
+                      const next = ensureLifecycle(draft);
+                      next.rotationIntervalDays = raw === '' ? null : Number(raw);
+                      if (raw === '') next.nextRotationDate = null;
+                    });
+                  }}
+                />
+              </Field>
+              <Field label="Nächste Rotation">
+                <input
+                  type="date"
+                  disabled={lifecycle.rotationIntervalDays === null}
+                  value={lifecycle.nextRotationDate ?? ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value || null;
+                    mutate((draft) => void (ensureLifecycle(draft).nextRotationDate = value));
+                  }}
+                />
+              </Field>
+            </div>
+          )}
+          <Field
+            label="Lokal bestätigter 2FA-Status"
+            hint="Diese Markierung prüft keinen Anbieter und speichert kein neues Geheimnis."
+          >
+            <select
+              value={lifecycle.twoFactorStatus}
+              onChange={(event) => {
+                const value = event.currentTarget.value as 'unknown' | 'active' | 'inactive';
+                mutate((draft) => void (ensureLifecycle(draft).twoFactorStatus = value));
+              }}
+            >
+              <option value="unknown">Unbekannt</option>
+              <option value="active">Aktiv</option>
+              <option value="inactive">Nicht aktiv</option>
+            </select>
+          </Field>
+        </>
+      )}
+      {supportsExpiry && (
+        <Field
+          label="Ablauf-Erinnerung"
+          hint="Kryptris speichert nur das Datum und meldet es in der lokalen Übersicht."
+        >
+          <input
+            type="date"
+            value={lifecycle.expiryReminderDate ?? ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value || null;
+              mutate((draft) => void (ensureLifecycle(draft).expiryReminderDate = value));
+            }}
+          />
+        </Field>
+      )}
+    </EditorSection>
   );
 }
 

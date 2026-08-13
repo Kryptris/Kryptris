@@ -9,14 +9,141 @@ import {
   History,
   RefreshCw,
   RotateCcw,
+  ShieldCheck,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import type { AppState, AuditEvent, BackupInfo } from '../../shared/models';
+import type {
+  AppState,
+  AuditEvent,
+  BackupHealthFailureCode,
+  BackupHealthSnapshot,
+  BackupInfo,
+  RestoreDryRunResult,
+} from '../../shared/models';
 import type { Notify } from '../types';
 import { formatBytes, formatDate, getErrorMessage } from '../utils';
 import { BackupRestoreModal } from './BackupRestoreModal';
 import { Button, EmptyState, InlineNotice } from './ui';
+
+const BACKUP_FAILURE_COPY: Record<BackupHealthFailureCode, string> = {
+  AUTH_FAILED: 'Zugang konnte nicht bestätigt werden',
+  AUTH_FACTOR_REQUIRED: 'Ein zusätzlicher Entsperrfaktor fehlt',
+  AUTH_RATE_LIMITED: 'Der Zugang ist vorübergehend begrenzt',
+  CORRUPT_DATA: 'Die Sicherung konnte nicht vollständig geprüft werden',
+  INVALID_INPUT: 'Die Sicherungsanfrage war ungültig',
+  LOCKED: 'Kryptris war gesperrt',
+  NOT_FOUND: 'Eine benötigte Sicherung fehlt',
+  CANCELLED: 'Der Vorgang wurde abgebrochen',
+  CONFLICT: 'Der Sicherungsstand hat sich während des Vorgangs geändert',
+  FILE_TOO_LARGE: 'Die Sicherung überschreitet eine Sicherheitsgrenze',
+  UNSUPPORTED_FORMAT: 'Das Sicherungsformat wird nicht unterstützt',
+  UNSAFE_PATH: 'Das Sicherungsziel wurde aus Sicherheitsgründen abgelehnt',
+  INTERNAL: 'Der Sicherungsvorgang konnte nicht abgeschlossen werden',
+};
+
+function backupDate(value: string | null): string {
+  return value === null ? 'Noch nicht vorhanden' : formatDate(value);
+}
+
+function backupMode(automatic: boolean): string {
+  return automatic ? 'Automatisch' : 'Manuell';
+}
+
+function BackupHealthDetails({ health }: { health: BackupHealthSnapshot }) {
+  const latest = health.latestBackup;
+  return (
+    <>
+      <InlineNotice
+        kind={health.targetReachable ? 'success' : 'warning'}
+        title={
+          health.targetReachable ? 'Sicherungsziel erreichbar' : 'Sicherungsziel nicht erreichbar'
+        }
+      >
+        {health.targetReachable
+          ? 'Die zuletzt geprüfte lokale Sicherungsablage ist erreichbar.'
+          : 'Richte ein Sicherungsziel ein oder verbinde den gewählten Datenträger erneut.'}
+      </InlineNotice>
+      {health.sameDriveWarning && (
+        <InlineNotice kind="warning" title="Getrennten Speicherort verwenden">
+          Das Sicherungsziel liegt auf demselben Laufwerk wie das Profil. Ein separater Datenträger
+          schützt besser vor Geräteausfällen.
+        </InlineNotice>
+      )}
+      {health.unreadableBackupCount > 0 && (
+        <InlineNotice kind="warning" title="Nicht alle Sicherungen lesbar">
+          {health.unreadableBackupCount === 1
+            ? 'Eine vorhandene Sicherung konnte nicht als gültiges Kryptris-Backup geprüft werden.'
+            : `${String(health.unreadableBackupCount)} vorhandene Sicherungen konnten nicht als gültige Kryptris-Backups geprüft werden.`}
+        </InlineNotice>
+      )}
+      <dl className="security-center__metadata" aria-label="Zusammenfassung der Sicherungen">
+        <div>
+          <dt>Geprüfte Sicherungen</dt>
+          <dd>{String(health.backupCount)}</dd>
+        </div>
+        <div>
+          <dt>Gesamtgröße</dt>
+          <dd>{formatBytes(health.totalSize)}</dd>
+        </div>
+        <div>
+          <dt>Tägliche Generationen</dt>
+          <dd>{String(health.generations.daily)}</dd>
+        </div>
+        <div>
+          <dt>Wöchentliche Generationen</dt>
+          <dd>{String(health.generations.weekly)}</dd>
+        </div>
+        <div>
+          <dt>Monatliche Generationen</dt>
+          <dd>{String(health.generations.monthly)}</dd>
+        </div>
+        <div>
+          <dt>Letzte erfolgreiche Sicherung</dt>
+          <dd>{backupDate(health.lastSuccessfulBackupAt)}</dd>
+        </div>
+        <div>
+          <dt>Letzter Probelauf</dt>
+          <dd>{backupDate(health.lastSemanticVerificationAt)}</dd>
+        </div>
+      </dl>
+      {latest === null ? (
+        <InlineNotice kind="info" title="Noch keine Sicherung geprüft">
+          Erstelle eine verschlüsselte Sicherung, damit Kryptris den Sicherungsstand bewerten kann.
+        </InlineNotice>
+      ) : (
+        <dl className="security-center__metadata" aria-label="Letzte geprüfte Sicherung">
+          <div>
+            <dt>Letzte geprüfte Sicherung</dt>
+            <dd>{formatDate(latest.createdAt)}</dd>
+          </div>
+          <div>
+            <dt>Art</dt>
+            <dd>{backupMode(latest.automatic)}</dd>
+          </div>
+          <div>
+            <dt>Tresore</dt>
+            <dd>{String(latest.vaultCount)}</dd>
+          </div>
+          <div>
+            <dt>Anhänge</dt>
+            <dd>{String(latest.attachmentCount)}</dd>
+          </div>
+          <div>
+            <dt>Größe</dt>
+            <dd>{formatBytes(latest.size)}</dd>
+          </div>
+        </dl>
+      )}
+      {health.lastFailure !== null && (
+        <InlineNotice kind="warning" title="Letzter fehlgeschlagener Sicherungsvorgang">
+          {formatDate(health.lastFailure.occurredAt)} ·{' '}
+          {BACKUP_FAILURE_COPY[health.lastFailure.code]}
+        </InlineNotice>
+      )}
+    </>
+  );
+}
 
 export function BackupView({
   state,
@@ -30,7 +157,58 @@ export function BackupView({
   const [folder, setFolder] = useState(state.settings?.backupFolder ?? null);
   const [lastBackup, setLastBackup] = useState<BackupInfo | null>(null);
   const [restoreOpen, setRestoreOpen] = useState(false);
+  const [dryRunOpen, setDryRunOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState<BackupHealthSnapshot | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+  const [healthLiveMessage, setHealthLiveMessage] = useState('Sicherungsstatus wird geladen.');
+  const healthRequestRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const loadHealth = useCallback(
+    async (refresh = false) => {
+      if (healthRequestRef.current) return;
+      healthRequestRef.current = true;
+      if (mountedRef.current) {
+        setHealthLoading(true);
+        setHealthLiveMessage(
+          refresh ? 'Sicherungsstatus wird aktualisiert.' : 'Sicherungsstatus wird geladen.',
+        );
+      }
+      try {
+        const next = await window.vaulta.backup.getHealth({
+          requestId: crypto.randomUUID(),
+          refresh,
+        });
+        if (!mountedRef.current) return;
+        setHealth(next);
+        setHealthLiveMessage('Sicherungsstatus wurde aktualisiert.');
+      } catch {
+        if (!mountedRef.current) return;
+        setHealthLiveMessage('Sicherungsstatus konnte nicht aktualisiert werden.');
+        notify(
+          'error',
+          'Sicherungsstatus konnte nicht aktualisiert werden',
+          'Prüfe das Sicherungsziel und versuche es erneut.',
+        );
+      } finally {
+        healthRequestRef.current = false;
+        if (mountedRef.current) setHealthLoading(false);
+      }
+    },
+    [notify],
+  );
+
+  useEffect(() => {
+    void loadHealth();
+  }, [loadHealth]);
 
   const chooseFolder = async () => {
     try {
@@ -45,6 +223,7 @@ export function BackupView({
             },
           });
           onStateChange({ ...state, settings });
+          void loadHealth(true);
         }
       }
     } catch (error: unknown) {
@@ -58,10 +237,15 @@ export function BackupView({
       const result = await window.vaulta.backup.create({ automatic: false });
       if (result) {
         setLastBackup(result);
-        notify('success', 'Verschlüsseltes Backup erstellt', result.path);
+        notify(
+          'success',
+          'Verschlüsseltes Backup erstellt',
+          'Der Sicherungsstatus wird aktualisiert.',
+        );
+        void loadHealth(true);
       }
-    } catch (error: unknown) {
-      notify('error', 'Backup fehlgeschlagen', getErrorMessage(error));
+    } catch {
+      notify('error', 'Backup fehlgeschlagen', 'Prüfe das Sicherungsziel und versuche es erneut.');
     } finally {
       setBusy(false);
     }
@@ -136,6 +320,32 @@ export function BackupView({
           </p>
         </section>
       </div>
+      <section
+        className="tool-card"
+        aria-labelledby="backup-health-title"
+        aria-busy={healthLoading}
+      >
+        <header>
+          <div>
+            <ShieldCheck />
+            <div>
+              <h2 id="backup-health-title">Sicherungsstatus</h2>
+              <p>Lokale, pfadfreie Übersicht über Sicherungen und Probeläufe.</p>
+            </div>
+          </div>
+          <Button icon={<RefreshCw />} busy={healthLoading} onClick={() => void loadHealth(true)}>
+            Aktualisieren
+          </Button>
+        </header>
+        <p className="sr-only" aria-live="polite" aria-atomic="true">
+          {healthLiveMessage}
+        </p>
+        {health !== null ? (
+          <BackupHealthDetails health={health} />
+        ) : (
+          <InlineNotice kind="info">Sicherungsstatus wird lokal geladen.</InlineNotice>
+        )}
+      </section>
       {lastBackup && (
         <section className="tool-card last-backup">
           <header>
@@ -158,9 +368,26 @@ export function BackupView({
               <strong>{String(lastBackup.attachmentCount)}</strong>Anhänge
             </span>
           </div>
-          <code>{lastBackup.path}</code>
         </section>
       )}
+      <section className="tool-card restore-card">
+        <header>
+          <div>
+            <Check />
+            <div>
+              <h2>Backup probeweise prüfen</h2>
+              <p>Prüft ein ausgewähltes Backup vollständig, ohne Daten wiederherzustellen.</p>
+            </div>
+          </div>
+          <Button icon={<ShieldCheck />} onClick={() => setDryRunOpen(true)}>
+            Probelauf starten
+          </Button>
+        </header>
+        <InlineNotice kind="info">
+          Der Probelauf verwendet einen getrennten temporären Bereich und verwirft ihn nach
+          Abschluss oder Abbruch. Der aktuelle Profilstand bleibt unverändert.
+        </InlineNotice>
+      </section>
       <section className="tool-card restore-card">
         <header>
           <div>
@@ -185,6 +412,21 @@ export function BackupView({
         onClose={() => setRestoreOpen(false)}
         onRestored={onStateChange}
       />
+      <BackupRestoreModal
+        open={dryRunOpen}
+        mode="dry-run"
+        notify={notify}
+        onClose={() => setDryRunOpen(false)}
+        onRestored={onStateChange}
+        onDryRunCompleted={(result: RestoreDryRunResult) => {
+          notify(
+            'success',
+            'Backup probeweise geprüft',
+            `${String(result.vaultCount)} Tresor${result.vaultCount === 1 ? '' : 'e'} und ${String(result.attachmentCount)} Anhang${result.attachmentCount === 1 ? '' : 'e'} wurden lokal verifiziert.`,
+          );
+          void loadHealth(true);
+        }}
+      />
     </section>
   );
 }
@@ -202,6 +444,11 @@ const AUDIT_LABELS: Record<AuditEvent['type'], string> = {
   'entry-moved-to-trash': 'In Papierkorb verschoben',
   'entry-restored': 'Eintrag wiederhergestellt',
   'entry-purged': 'Eintrag endgültig gelöscht',
+  'entry-copied-to-vault': 'In anderen Tresor kopiert',
+  'entry-moved-to-vault': 'In anderen Tresor verschoben',
+  'entries-merged': 'Dubletten zusammengeführt',
+  'data-quality-fixed': 'Datenqualität korrigiert',
+  'trash-auto-purged': 'Papierkorb automatisch geleert',
   'attachment-added': 'Anhang hinzugefügt',
   'attachment-exported': 'Anhang exportiert',
   'private-key-exported': 'Privaten Schlüssel exportiert',
@@ -209,11 +456,20 @@ const AUDIT_LABELS: Record<AuditEvent['type'], string> = {
   'export-completed': 'Export abgeschlossen',
   'backup-created': 'Backup erstellt',
   'backup-restored': 'Backup wiederhergestellt',
+  'backup-dry-run-completed': 'Backup probeweise geprüft',
+  'import-mapping-profile-updated': 'Import-Feldzuordnung aktualisiert',
+  'vault-package-exported': 'Verschlüsseltes Tresor-Paket exportiert',
+  'vault-package-imported': 'Verschlüsseltes Tresor-Paket importiert',
   'settings-updated': 'Einstellungen geändert',
   'factor-added': 'Faktor hinzugefügt',
   'factor-removed': 'Faktor entfernt',
   'recovery-rotated': 'Wiederherstellungsschlüssel ersetzt',
   'recovery-used': 'Wiederherstellung verwendet',
+  'recovery-readiness-succeeded': 'Recovery-Bereitschaft bestätigt',
+  'recovery-readiness-failed': 'Recovery-Bereitschaft nicht bestätigt',
+  'integrity-check-completed': 'Integritätsprüfung abgeschlossen',
+  'breach-list-imported': 'Datenleckliste importiert',
+  'breach-list-removed': 'Datenleckliste entfernt',
 };
 
 export function AuditView({ notify }: { notify: Notify }) {

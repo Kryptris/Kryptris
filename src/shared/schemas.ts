@@ -1,12 +1,24 @@
 import { z } from 'zod';
 
-import { ENTRY_TYPES } from './models';
+import {
+  ENTRY_TYPES,
+  SMART_VIEW_KINDS,
+  type EntryLifecycleMetadata,
+  type EntryType,
+} from './models';
+import { normalizeTagName, normalizeTags } from './tags';
 
 const idSchema = z.string().uuid();
 const titleSchema = z.string().trim().min(1).max(200);
+const tagNameSchema = z
+  .string()
+  .max(200)
+  .transform(normalizeTagName)
+  .pipe(z.string().min(1).max(80));
 const shortTextSchema = z.string().max(2_000);
 const longTextSchema = z.string().max(1_000_000);
 const passwordSchema = z.string().min(12).max(1_024);
+export const recoveryKeySchema = z.string().min(32).max(256);
 const colorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const fieldPathSchema = z
   .string()
@@ -182,18 +194,176 @@ const entryDataSchema = z.discriminatedUnion('type', [
     .strict(),
 ]);
 
+export const entryLifecycleMetadataSchema = z
+  .object({
+    rotationIntervalDays: z.number().int().min(1).max(3_650).nullable(),
+    nextRotationDate: z.iso.date().nullable(),
+    rotationExcluded: z.boolean(),
+    twoFactorStatus: z.enum(['unknown', 'active', 'inactive']),
+    expiryReminderDate: z.iso.date().nullable(),
+  })
+  .strict();
+
+function lifecycleSemanticIssues(
+  entryType: EntryType,
+  lifecycle: EntryLifecycleMetadata,
+): Array<{ path: string[]; message: string }> {
+  const issues: Array<{ path: string[]; message: string }> = [];
+  if (
+    entryType !== 'credential' &&
+    (lifecycle.rotationIntervalDays !== null ||
+      lifecycle.nextRotationDate !== null ||
+      lifecycle.rotationExcluded ||
+      lifecycle.twoFactorStatus !== 'unknown')
+  ) {
+    issues.push({
+      path: [],
+      message: 'Rotation und Zwei-Faktor-Status sind nur für Zugangsdaten zulässig.',
+    });
+  }
+  if (
+    !['credit-card', 'software-license', 'file'].includes(entryType) &&
+    lifecycle.expiryReminderDate !== null
+  ) {
+    issues.push({
+      path: ['expiryReminderDate'],
+      message: 'Ein Ablaufhinweis ist für diesen Eintragstyp nicht zulässig.',
+    });
+  }
+  if (
+    lifecycle.rotationExcluded &&
+    (lifecycle.rotationIntervalDays !== null || lifecycle.nextRotationDate !== null)
+  ) {
+    issues.push({
+      path: ['rotationExcluded'],
+      message: 'Ausgeschlossene Einträge dürfen kein Rotationsintervall oder Folgedatum besitzen.',
+    });
+  }
+  if (lifecycle.rotationIntervalDays === null && lifecycle.nextRotationDate !== null) {
+    issues.push({
+      path: ['nextRotationDate'],
+      message: 'Ein Rotationsdatum benötigt ein Rotationsintervall.',
+    });
+  }
+  return issues;
+}
+
+function addLifecycleSemanticIssues(
+  entryType: EntryType,
+  lifecycle: EntryLifecycleMetadata,
+  context: z.RefinementCtx,
+): void {
+  for (const issue of lifecycleSemanticIssues(entryType, lifecycle)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['lifecycle', ...issue.path],
+      message: issue.message,
+    });
+  }
+}
+
+const storedIdentifierSchema = z
+  .string()
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u);
+const storedTimestampSchema = z.iso.datetime();
+const storedCustomFieldSchema = z
+  .object({
+    id: storedIdentifierSchema,
+    label: z.string().max(100),
+    type: z.enum(['text', 'secret', 'url', 'number', 'date', 'boolean']),
+    value: z.union([longTextSchema, z.number().finite(), z.boolean()]),
+    secret: z.boolean(),
+    searchable: z.boolean(),
+    order: z.number().int().min(0).max(1_000),
+  })
+  .strict();
+const storedAttachmentSchema = z
+  .object({
+    id: storedIdentifierSchema,
+    name: z.string().max(255),
+    mediaType: z.string().max(255),
+    size: z.number().int().nonnegative(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/iu),
+    createdAt: storedTimestampSchema,
+    previewable: z.boolean(),
+  })
+  .strict();
+const storedFolderSchema = z
+  .object({
+    id: storedIdentifierSchema,
+    name: z.string().max(200),
+    color: colorSchema,
+    createdAt: storedTimestampSchema,
+  })
+  .strict();
+const storedEntryFields = {
+  id: storedIdentifierSchema,
+  vaultId: storedIdentifierSchema,
+  title: z.string().max(200),
+  folderId: storedIdentifierSchema.nullable(),
+  tags: z.array(z.string().max(80)).max(50),
+  favorite: z.boolean(),
+  note: longTextSchema,
+  customFields: z.array(storedCustomFieldSchema).max(100),
+  attachments: z.array(storedAttachmentSchema).max(10_000),
+  data: entryDataSchema,
+  createdAt: storedTimestampSchema,
+  updatedAt: storedTimestampSchema,
+  secretChangedAt: storedTimestampSchema,
+  lastUsedAt: storedTimestampSchema.nullable(),
+  deletedAt: storedTimestampSchema.nullable(),
+} as const;
+
+export const vaultEntryV1Schema = z.object(storedEntryFields).strict();
+export const vaultEntryV2Schema = z
+  .object({ ...storedEntryFields, lifecycle: entryLifecycleMetadataSchema })
+  .strict()
+  .superRefine((value, context) => {
+    addLifecycleSemanticIssues(value.data.type, value.lifecycle, context);
+  });
+const storedVaultDocumentFields = {
+  id: storedIdentifierSchema,
+  name: z.string().max(100),
+  color: colorSchema,
+  createdAt: storedTimestampSchema,
+  updatedAt: storedTimestampSchema,
+  folders: z.array(storedFolderSchema),
+} as const;
+
+export const vaultDocumentV1Schema = z
+  .object({
+    ...storedVaultDocumentFields,
+    formatVersion: z.literal(1),
+    entries: z.array(vaultEntryV1Schema),
+  })
+  .strict();
+export const vaultDocumentV2Schema = z
+  .object({
+    ...storedVaultDocumentFields,
+    formatVersion: z.literal(2),
+    entries: z.array(vaultEntryV2Schema),
+  })
+  .strict();
+
 export const entryInputSchema = z
   .object({
     id: idSchema.optional(),
     title: titleSchema,
     folderId: idSchema.nullable(),
-    tags: z.array(z.string().trim().min(1).max(80)).max(50),
+    tags: z.array(tagNameSchema).max(50).transform(normalizeTags),
     favorite: z.boolean(),
     note: longTextSchema,
     customFields: z.array(customFieldSchema).max(100),
     data: entryDataSchema,
+    lifecycle: entryLifecycleMetadataSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.lifecycle !== undefined) {
+      addLifecycleSemanticIssues(value.data.type, value.lifecycle, context);
+    }
+  });
 
 export const entryListQuerySchema = z
   .object({
@@ -201,11 +371,86 @@ export const entryListQuerySchema = z
     search: z.string().max(500),
     view: z.enum(['all', 'favorites', 'trash', 'recent']),
     types: z.array(z.enum(ENTRY_TYPES)).max(ENTRY_TYPES.length),
-    tags: z.array(z.string().max(80)).max(50),
+    tags: z.array(tagNameSchema).max(50).transform(normalizeTags),
     folderId: idSchema.nullable(),
     security: z.array(z.enum(['good', 'info', 'warning', 'critical'])).max(4),
+    smartView: z.enum(SMART_VIEW_KINDS).nullable().optional(),
   })
   .strict();
+
+const savedViewFiltersSchema = z
+  .object({
+    search: z.string().max(500),
+    view: z.enum(['all', 'favorites', 'trash', 'recent']),
+    types: z.array(z.enum(ENTRY_TYPES)).max(ENTRY_TYPES.length),
+    tags: z.array(tagNameSchema).max(50).transform(normalizeTags),
+    folderId: idSchema.nullable(),
+    security: z.array(z.enum(['good', 'info', 'warning', 'critical'])).max(4),
+    smartView: z.enum(SMART_VIEW_KINDS).nullable(),
+  })
+  .strict();
+
+export const savedViewRecordSchema = z
+  .object({
+    id: idSchema,
+    vaultId: idSchema,
+    name: titleSchema,
+    filters: savedViewFiltersSchema,
+    order: z.number().int().min(0).max(100_000),
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+  })
+  .strict();
+
+const batchEntryActionSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('favorite'), value: z.boolean() }).strict(),
+  z.object({ type: z.literal('tags-add'), tags: z.array(tagNameSchema).min(1).max(50) }).strict(),
+  z
+    .object({ type: z.literal('tags-remove'), tags: z.array(tagNameSchema).min(1).max(50) })
+    .strict(),
+  z.object({ type: z.literal('folder-set'), folderId: idSchema.nullable() }).strict(),
+  z.object({ type: z.literal('trash') }).strict(),
+  z.object({ type: z.literal('restore') }).strict(),
+  z
+    .object({
+      type: z.literal('purge'),
+      masterPassword: z.string().min(1).max(1_024),
+      confirmationCount: z.number().int().min(1).max(10_000),
+    })
+    .strict(),
+  z.object({ type: z.literal('copy-to-vault'), targetVaultId: idSchema }).strict(),
+  z.object({ type: z.literal('move-to-vault'), targetVaultId: idSchema }).strict(),
+]);
+
+const batchEntryInputSchema = z
+  .object({
+    vaultId: idSchema,
+    entryIds: z.array(idSchema).min(1).max(10_000),
+    action: batchEntryActionSchema,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.entryIds).size !== value.entryIds.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['entryIds'],
+        message: 'Eintrags-IDs sind doppelt.',
+      });
+    }
+  });
+
+const duplicateReferenceSchema = z
+  .object({
+    vaultId: idSchema,
+    entryId: idSchema,
+    updatedAt: z.iso.datetime(),
+  })
+  .strict();
+const mergeFieldSchema = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[a-z][a-z0-9.-]*$/u);
 
 export const passwordGeneratorOptionsSchema = z
   .object({
@@ -250,7 +495,24 @@ export const vaultaSettingsSchema = z
       .strict(),
     auditMaxEvents: z.number().int().min(100).max(100_000),
     auditRetentionDays: z.number().int().min(1).max(3_650),
+    trashRetentionDays: z.number().int().min(1).max(3_650).nullable().default(null),
     reducedMotion: z.boolean(),
+    minimizeToTray: z.boolean().default(false),
+    closeToTray: z.boolean().default(false),
+    startWithWindows: z.boolean().default(false),
+    startMinimized: z.boolean().default(false),
+    focusMode: z.boolean().default(false),
+    localReminders: z
+      .object({
+        rotation: z.boolean(),
+        expiry: z.boolean(),
+        backup: z.boolean(),
+      })
+      .strict()
+      .default({ rotation: false, expiry: false, backup: false }),
+    // Existing protected settings predate the local onboarding flow. They must
+    // never unexpectedly re-enter an onboarding dialog after this update.
+    onboardingCompleted: z.boolean().default(true),
   })
   .strict();
 
@@ -285,6 +547,22 @@ export const importMappingSchema = z
     tags: z.string().max(200),
   })
   .strict();
+
+const importFormatSchema = z.enum([
+  'bitwarden-json',
+  'onepassword-csv',
+  'lastpass-csv',
+  'keepass-csv',
+  'protonpass-json',
+  'dashlane-csv',
+  'nordpass-csv',
+  'roboform-csv',
+  'chrome-csv',
+  'edge-csv',
+  'firefox-csv',
+  'generic-csv',
+  'generic-json',
+]);
 
 const webauthnBase64UrlSchema = z
   .string()
@@ -354,7 +632,7 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
     .strict(),
   'vaulta:auth:security-key-cancel': z.object({ challengeId: idSchema }).strict(),
   'vaulta:auth:recover': z
-    .object({ recoveryKey: z.string().min(32).max(256), newMasterPassword: passwordSchema })
+    .object({ recoveryKey: recoveryKeySchema, newMasterPassword: passwordSchema })
     .strict(),
   'vaulta:auth:change-master-password': z
     .object({ currentPassword: z.string().min(1).max(1_024), newPassword: passwordSchema })
@@ -381,7 +659,13 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
   'vaulta:entry:update': z
     .object({ vaultId: idSchema, entryId: idSchema, entry: entryInputSchema })
     .strict(),
-  'vaulta:entry:trash': z.object({ vaultId: idSchema, entryId: idSchema }).strict(),
+  'vaulta:entry:trash': z
+    .object({
+      vaultId: idSchema,
+      entryId: idSchema,
+      updatedAt: z.iso.datetime().optional(),
+    })
+    .strict(),
   'vaulta:entry:restore': z.object({ vaultId: idSchema, entryId: idSchema }).strict(),
   'vaulta:entry:purge': z
     .object({ vaultId: idSchema, entryId: idSchema, masterPassword: z.string().min(1).max(1_024) })
@@ -422,12 +706,45 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
   'vaulta:totp:copy': z.object({ vaultId: idSchema, entryId: idSchema }).strict(),
   'vaulta:totp:import-qr': z.enum(['file', 'screen']),
   'vaulta:security:scan': idSchema.optional(),
+  'vaulta:security:center-scan': z
+    .object({ requestId: idSchema, refresh: z.boolean().optional() })
+    .strict(),
+  'vaulta:security:recovery-status': z.undefined(),
+  'vaulta:security:recovery-test': z.object({ recoveryKey: recoveryKeySchema }).strict(),
+  'vaulta:security:integrity-scan': z
+    .object({ requestId: idSchema, refresh: z.boolean().optional() })
+    .strict(),
+  'vaulta:security:integrity-save-report': z.object({ reportId: idSchema }).strict(),
+  'vaulta:security:breach-status': z.undefined(),
+  'vaulta:security:breach-import': z
+    .object({
+      requestId: idSchema,
+      sourceLabel: z.string().trim().min(1).max(120),
+      sourceDate: z.iso.date(),
+    })
+    .strict(),
+  'vaulta:security:breach-scan': z
+    .object({ requestId: idSchema, refresh: z.boolean().optional() })
+    .strict(),
+  'vaulta:security:breach-remove': z.undefined(),
   'vaulta:backup:create': z.object({ automatic: z.boolean().optional() }).strict().optional(),
+  'vaulta:backup:health': z
+    .object({ requestId: idSchema, refresh: z.boolean().optional() })
+    .strict(),
+  'vaulta:backup:dry-run': z
+    .object({
+      requestId: idSchema,
+      credential: z.discriminatedUnion('type', [
+        z.object({ type: z.literal('master'), value: z.string().min(1).max(1_024) }).strict(),
+        z.object({ type: z.literal('recovery'), value: recoveryKeySchema }).strict(),
+      ]),
+    })
+    .strict(),
   'vaulta:backup:restore': z
     .object({
       credential: z.discriminatedUnion('type', [
         z.object({ type: z.literal('master'), value: z.string().min(1).max(1_024) }).strict(),
-        z.object({ type: z.literal('recovery'), value: z.string().min(32).max(256) }).strict(),
+        z.object({ type: z.literal('recovery'), value: recoveryKeySchema }).strict(),
       ]),
       newMasterPassword: passwordSchema.optional(),
     })
@@ -436,21 +753,17 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
   'vaulta:import:preview': z
     .object({
       vaultId: idSchema,
-      format: z
-        .enum([
-          'bitwarden-json',
-          'onepassword-csv',
-          'lastpass-csv',
-          'keepass-csv',
-          'protonpass-json',
-          'chrome-csv',
-          'edge-csv',
-          'firefox-csv',
-          'generic-csv',
-          'generic-json',
-        ])
-        .optional(),
+      format: importFormatSchema.optional(),
       mapping: importMappingSchema.optional(),
+    })
+    .strict(),
+  'vaulta:import:preview-dropped': z
+    .object({
+      vaultId: idSchema,
+      format: importFormatSchema.optional(),
+      mapping: importMappingSchema.optional(),
+      // Injected only by preload via Electron webUtils.getPathForFile().
+      sourcePath: localWindowsFolderPathSchema,
     })
     .strict(),
   'vaulta:import:remap': z.object({ token: idSchema, mapping: importMappingSchema }).strict(),
@@ -459,6 +772,43 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
       token: idSchema,
       vaultId: idSchema,
       selectedRows: z.array(z.number().int().min(0)).max(100_000),
+    })
+    .strict(),
+  'vaulta:import:mapping-profiles': z.undefined(),
+  'vaulta:import:mapping-profile-save': z
+    .object({
+      id: idSchema.optional(),
+      name: z
+        .string()
+        .trim()
+        .min(1)
+        .max(80)
+        .refine((value) => !/[\r\n\0]/u.test(value)),
+      mapping: importMappingSchema,
+    })
+    .strict(),
+  'vaulta:import:mapping-profile-remove': z.object({ id: idSchema }).strict(),
+  'vaulta:vault-package:export': z
+    .object({
+      vaultId: idSchema,
+      exportPassword: z.string().min(12).max(4_096),
+      includeAttachments: z.boolean(),
+    })
+    .strict(),
+  'vaulta:vault-package:preview-import': z
+    .object({ exportPassword: z.string().min(12).max(4_096) })
+    .strict(),
+  'vaulta:vault-package:import': z
+    .object({
+      token: idSchema,
+      exportPassword: z.string().min(12).max(4_096),
+      targetVaultName: z
+        .string()
+        .trim()
+        .min(1)
+        .max(100)
+        .refine((value) => !/[\r\n\0]/u.test(value)),
+      allowNameConflict: z.boolean(),
     })
     .strict(),
   'vaulta:export:execute': z
@@ -522,6 +872,86 @@ export const IPC_REQUEST_SCHEMAS: Record<string, z.ZodType> = {
     .strict(),
   'vaulta:template:delete': idSchema,
   'vaulta:report:generate': z.undefined(),
+  'vaulta:productivity:batch': batchEntryInputSchema,
+  'vaulta:productivity:saved-view-list': idSchema,
+  'vaulta:productivity:saved-view-save': z
+    .object({
+      id: idSchema.optional(),
+      vaultId: idSchema,
+      name: titleSchema,
+      filters: savedViewFiltersSchema,
+    })
+    .strict(),
+  'vaulta:productivity:saved-view-reorder': z
+    .object({ vaultId: idSchema, orderedIds: z.array(idSchema).max(1_000) })
+    .strict(),
+  'vaulta:productivity:saved-view-delete': z.object({ vaultId: idSchema, id: idSchema }).strict(),
+  'vaulta:productivity:tag-list': idSchema,
+  'vaulta:productivity:tag-rename': z
+    .object({ vaultId: idSchema, tag: tagNameSchema, name: tagNameSchema })
+    .strict(),
+  'vaulta:productivity:tag-merge': z
+    .object({
+      vaultId: idSchema,
+      sourceTags: z.array(tagNameSchema).min(1).max(50),
+      targetName: tagNameSchema,
+    })
+    .strict(),
+  'vaulta:productivity:tag-delete': z.object({ vaultId: idSchema, tag: tagNameSchema }).strict(),
+  'vaulta:quality:duplicate-scan': z
+    .object({
+      requestId: idSchema,
+      vaultId: idSchema.nullable().optional(),
+      refresh: z.boolean().optional(),
+    })
+    .strict(),
+  'vaulta:quality:duplicate-describe': z
+    .object({
+      survivor: duplicateReferenceSchema,
+      duplicate: duplicateReferenceSchema,
+    })
+    .strict(),
+  'vaulta:quality:duplicate-merge': z
+    .object({
+      survivor: duplicateReferenceSchema,
+      duplicate: duplicateReferenceSchema,
+      fieldChoices: z
+        .array(
+          z
+            .object({
+              field: mergeFieldSchema,
+              source: z.enum(['survivor', 'duplicate']),
+            })
+            .strict(),
+        )
+        .max(200),
+      collectionChoices: z
+        .array(
+          z
+            .object({
+              field: mergeFieldSchema,
+              strategy: z.enum(['survivor', 'duplicate', 'union']),
+            })
+            .strict(),
+        )
+        .max(100),
+    })
+    .strict(),
+  'vaulta:quality:data-scan': z
+    .object({
+      requestId: idSchema,
+      vaultId: idSchema,
+      refresh: z.boolean().optional(),
+    })
+    .strict(),
+  'vaulta:quality:data-fix-preview': z
+    .object({
+      vaultId: idSchema,
+      findingId: z.string().min(1).max(512),
+    })
+    .strict(),
+  'vaulta:quality:data-fix-apply': z.object({ token: idSchema }).strict(),
+  'vaulta:job:cancel': z.object({ requestId: idSchema }).strict(),
   'vaulta:window:minimize': z.undefined(),
   'vaulta:window:toggle-maximize': z.undefined(),
   'vaulta:window:close': z.undefined(),

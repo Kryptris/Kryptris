@@ -2,9 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
   access,
+  chmod,
   lstat,
   mkdir,
+  mkdtemp,
   open,
+  realpath,
   readFile,
   readdir,
   rename,
@@ -12,20 +15,26 @@ import {
   stat,
   type FileHandle,
 } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { VaultaError } from '../../shared/errors';
 import type { BackupInfo, BackupRotation } from '../../shared/models';
 import { type AesGcmEnvelope, CryptoService } from '../security/crypto-service';
-import { AtomicFileWriter } from '../storage/atomic-file';
+import { AtomicFileWriter, type AtomicRecoveryResult } from '../storage/atomic-file';
 import { assertSafeIdentifier, normalizeBackupPath, resolveInside } from '../storage/path-safety';
-import { parseStoredProfileHeader } from './profile-service';
-import type {
-  BackupCredential,
-  ProfileBackupAccessHeader,
+import { AttachmentService } from './attachment-service';
+import { AuditService } from './audit-service';
+import { IntegrityCheckService } from './integrity-check-service';
+import {
+  parseStoredProfileHeader,
   ProfileService,
-  StoredProfileHeader,
+  type AdditionalUnlockKey,
+  type BackupCredential,
+  type ProfileBackupAccessHeader,
+  type StoredProfileHeader,
 } from './profile-service';
+import { VaultService } from './vault-service';
 
 const BACKUP_MAGIC = Buffer.from('VLTBKP01', 'ascii');
 const BACKUP_VERSION = 1 as const;
@@ -86,6 +95,17 @@ export interface BackupServiceOptions {
   crypto?: CryptoService;
   atomicWriter?: AtomicFileWriter;
   now?: () => Date;
+  /**
+   * Dependency seam for the isolated restore probe. Production uses a fresh
+   * ProfileService with production Argon2id parameters; tests may inject their
+   * deliberately reduced test KDF.
+   */
+  stagedProfileFactory?: (rootDir: string) => ProfileService;
+  /**
+   * Must be a local directory outside the active profile. It is intended for
+   * controlled test and runtime configuration only, never renderer input.
+   */
+  dryRunTemporaryRoot?: string;
 }
 
 export interface CreateBackupInput {
@@ -128,6 +148,33 @@ export interface BackupInspection {
   automatic: boolean;
 }
 
+export interface RestoreDryRunProgress {
+  readonly phase: 'entschluesseln' | 'semantisch-pruefen' | 'abgeschlossen';
+  readonly completed: number;
+  readonly total: 2;
+}
+
+/**
+ * Internal Main-process input. `temporaryRoot` deliberately belongs to the
+ * service configuration rather than this input so a renderer can never choose
+ * a directory which receives restored artifacts.
+ */
+export interface RestoreDryRunInput {
+  readonly backupPath: string;
+  readonly credential: BackupCredential;
+  /** Optional WebAuthn/PRF material for a backup whose profile requires it. */
+  readonly additionalKey?: AdditionalUnlockKey;
+  /** Called between decrypted records and semantic checks, e.g. by LocalJobCoordinator. */
+  readonly assertAuthorized?: () => void;
+  readonly signal?: AbortSignal;
+  readonly onProgress?: (progress: RestoreDryRunProgress) => void;
+}
+
+export interface RestoreDryRunResult extends BackupInspection {
+  readonly verifiedAt: string;
+  readonly semanticallyVerified: true;
+}
+
 interface SourceFile {
   absolutePath: string;
   backupPath: string;
@@ -147,6 +194,11 @@ interface FileIdentity {
   readonly ctimeMs: number;
 }
 
+interface DirectoryIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
 export interface MigrationSnapshotSourceExpectation {
   readonly size: number;
   readonly sha256: string;
@@ -164,6 +216,69 @@ interface ProcessingFile {
   hash: ReturnType<typeof createHash>;
   bytesWritten: number;
   output: FileHandle | null;
+}
+
+interface ProcessBackupOptions {
+  readonly accessKeyOverride?: Buffer;
+  readonly assertAuthorized?: () => void;
+}
+
+interface DryRunWorkspace {
+  readonly stageRoot: string;
+  /** Canonical, directly-created directory. Never derive child paths from an alias. */
+  readonly canonicalStageRoot: string;
+  readonly stageRootIdentity: DirectoryIdentity;
+  readonly temporaryRoot: string;
+}
+
+/**
+ * Semantic dry-runs must be entirely observational. The normal readers use
+ * interrupted-write recovery as a convenience, but that recovery renames
+ * files. Staged readers use this writer so a late path manipulation cannot
+ * turn an otherwise read-only validation into a persistent write.
+ */
+class ReadOnlyStageAtomicFileWriter extends AtomicFileWriter {
+  public override writeFile(
+    ...arguments_: Parameters<AtomicFileWriter['writeFile']>
+  ): Promise<void> {
+    void arguments_;
+    return Promise.reject(this.writeForbidden());
+  }
+
+  public override writeGenerated(
+    ...arguments_: Parameters<AtomicFileWriter['writeGenerated']>
+  ): Promise<void> {
+    void arguments_;
+    return Promise.reject(this.writeForbidden());
+  }
+
+  public override recoverPreviousIfTargetMissing(
+    ...arguments_: Parameters<AtomicFileWriter['recoverPreviousIfTargetMissing']>
+  ): Promise<boolean> {
+    void arguments_;
+    return Promise.resolve(false);
+  }
+
+  public override cleanupOrphanedTemps(
+    ...arguments_: Parameters<AtomicFileWriter['cleanupOrphanedTemps']>
+  ): Promise<number> {
+    void arguments_;
+    return Promise.resolve(0);
+  }
+
+  public override recoverInterruptedWrites(
+    ...arguments_: Parameters<AtomicFileWriter['recoverInterruptedWrites']>
+  ): Promise<AtomicRecoveryResult> {
+    void arguments_;
+    return Promise.resolve({ restoredPrevious: 0, removedStalePrevious: 0, removedTemporary: 0 });
+  }
+
+  private writeForbidden(): VaultaError {
+    return new VaultaError(
+      'UNSAFE_PATH',
+      'Ein Restore-Probelauf darf keine Dateien im Staging verändern.',
+    );
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -401,12 +516,59 @@ function sameSourceIdentity(source: SourceFile, current: FileIdentity): boolean 
   return sameFileIdentity(source, current);
 }
 
+function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function isInsideOrEqual(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative.length === 0 ||
+    (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
+}
+
+/** Resolves an existing prefix before a caller can create through a junction. */
+async function resolveProjectedCanonicalPath(candidate: string): Promise<string> {
+  const resolvedCandidate = path.resolve(candidate);
+  let existingAncestor = resolvedCandidate;
+  while (true) {
+    const info = await lstat(existingAncestor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (info !== null) break;
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der Arbeitsbereich fuer den Restore-Probelauf ist nicht aufloesbar.',
+      );
+    }
+    existingAncestor = parent;
+  }
+  const canonicalAncestor = await realpath(existingAncestor);
+  return path.resolve(canonicalAncestor, path.relative(existingAncestor, resolvedCandidate));
+}
+
 export class BackupService {
   private readonly rootDir: string;
   private readonly profileService: ProfileService;
   private readonly crypto: CryptoService;
   private readonly atomicWriter: AtomicFileWriter;
+  private readonly readOnlyStageAtomicWriter = new ReadOnlyStageAtomicFileWriter();
   private readonly now: () => Date;
+  private readonly stagedProfileFactory: (rootDir: string) => ProfileService;
+  private readonly dryRunTemporaryRoot: string;
+  private dryRunRunning = false;
 
   public constructor(options: BackupServiceOptions) {
     this.rootDir = path.resolve(options.rootDir);
@@ -414,6 +576,9 @@ export class BackupService {
     this.crypto = options.crypto ?? new CryptoService();
     this.atomicWriter = options.atomicWriter ?? new AtomicFileWriter();
     this.now = options.now ?? (() => new Date());
+    this.stagedProfileFactory =
+      options.stagedProfileFactory ?? ((rootDir) => new ProfileService({ rootDir }));
+    this.dryRunTemporaryRoot = path.resolve(options.dryRunTemporaryRoot ?? os.tmpdir());
   }
 
   public async createBackup(input: CreateBackupInput = {}): Promise<BackupInfo> {
@@ -769,6 +934,78 @@ export class BackupService {
     });
   }
 
+  /**
+   * Authenticates and fully reads a backup in an isolated, short-lived working
+   * directory without ever replacing the active profile. The extracted files
+   * remain encrypted containers; plaintext only exists in the streaming
+   * decryptors and is erased by their owning services.
+   */
+  public async dryRunBackup(input: RestoreDryRunInput): Promise<RestoreDryRunResult> {
+    if (this.dryRunRunning) {
+      throw new VaultaError(
+        'CONFLICT',
+        'Ein Restore-Probelauf laeuft bereits. Warte auf dessen Abschluss oder brich ihn ab.',
+      );
+    }
+    this.dryRunRunning = true;
+
+    const assertActive = (): void => {
+      input.assertAuthorized?.();
+      if (input.signal?.aborted === true) {
+        throw new VaultaError('CANCELLED', 'Der Restore-Probelauf wurde abgebrochen.');
+      }
+    };
+    let workspace: DryRunWorkspace | null = null;
+
+    try {
+      assertActive();
+      workspace = await this.createDryRunWorkspace();
+      assertActive();
+      input.onProgress?.({ phase: 'entschluesseln', completed: 0, total: 2 });
+      const result = await this.processBackup(
+        path.resolve(input.backupPath),
+        input.credential,
+        workspace,
+        {
+          assertAuthorized: assertActive,
+        },
+      );
+      assertActive();
+
+      await this.assertDryRunWorkspaceTree(workspace);
+      const stagedHeaderBytes = await this.readDryRunStageProfileHeader(workspace);
+      const stagedHeader = parseStoredProfileHeader(JSON.parse(stagedHeaderBytes) as unknown);
+      if (
+        stagedHeader.profileId !== result.header.profileHeader.profileId ||
+        stagedHeader.updatedAt !== result.header.profileHeader.updatedAt
+      ) {
+        throw new VaultaError(
+          'CORRUPT_DATA',
+          'Profilheader und Backup-Manifest passen nicht zusammen.',
+        );
+      }
+
+      assertActive();
+      input.onProgress?.({ phase: 'semantisch-pruefen', completed: 1, total: 2 });
+      await this.assertDryRunWorkspaceTree(workspace);
+      await this.validateDryRunStage(workspace, input, assertActive);
+      assertActive();
+      const verifiedAt = this.now().toISOString();
+      if (Number.isNaN(Date.parse(verifiedAt))) {
+        throw new VaultaError('INTERNAL', 'Der Zeitpunkt der Backup-Pruefung ist ungueltig.');
+      }
+      const inspection = this.toInspection(result);
+      input.onProgress?.({ phase: 'abgeschlossen', completed: 2, total: 2 });
+      return { ...inspection, verifiedAt, semanticallyVerified: true };
+    } finally {
+      try {
+        if (workspace !== null) await this.removeDryRunWorkspace(workspace);
+      } finally {
+        this.dryRunRunning = false;
+      }
+    }
+  }
+
   public async restoreBackup(input: RestoreBackupInput): Promise<BackupRestoreResult> {
     const targetRoot = path.resolve(input.targetRoot ?? this.rootDir);
     const { stageRoot, rollbackRoot } = this.restorePaths(targetRoot);
@@ -1031,6 +1268,417 @@ export class BackupService {
     return removed.map((candidate) => candidate.path);
   }
 
+  private toInspection(result: {
+    header: BackupHeader;
+    manifest: BackupManifest;
+  }): BackupInspection {
+    return {
+      profileId: result.header.profileHeader.profileId,
+      createdAt: result.manifest.createdAt,
+      fileCount: result.manifest.files.length,
+      vaultCount: result.manifest.vaultCount,
+      attachmentCount: result.manifest.attachmentCount,
+      automatic: result.header.automatic,
+    };
+  }
+
+  private async validateDryRunStage(
+    workspace: DryRunWorkspace,
+    input: RestoreDryRunInput,
+    assertActive: () => void,
+  ): Promise<void> {
+    const stageRoot = workspace.canonicalStageRoot;
+    await this.assertDryRunWorkspaceTree(workspace);
+    const stagedProfile = this.stagedProfileFactory(stageRoot);
+    stagedProfile.enterReadOnlyMode();
+    const stagedVaults = new VaultService({
+      rootDir: stageRoot,
+      profileService: stagedProfile,
+      atomicWriter: this.readOnlyStageAtomicWriter,
+    });
+    let additionalSecret: Buffer | null = null;
+    const recoveryVerification = input.credential.type === 'recovery';
+    try {
+      assertActive();
+      if (input.credential.type === 'master') {
+        if (input.additionalKey === undefined) {
+          await stagedProfile.unlock(input.credential.value);
+        } else {
+          additionalSecret = Buffer.from(input.additionalKey.secret);
+          await stagedProfile.unlock(input.credential.value, {
+            keyId: input.additionalKey.keyId,
+            secret: additionalSecret,
+          });
+        }
+      } else {
+        // A recovery key yields the profile key, but not the master gate. Keep
+        // the original stage header immutable instead of creating a temporary
+        // future master password just for this verification.
+        await stagedProfile.unlockForReadOnlyRecoveryVerification(input.credential.value);
+      }
+      await this.assertDryRunWorkspaceTree(workspace);
+      assertActive();
+
+      const stagedAttachments = new AttachmentService({
+        rootDir: stageRoot,
+        vaultService: stagedVaults,
+      });
+      const stagedAudit = new AuditService({
+        rootDir: stageRoot,
+        profileService: stagedProfile,
+        atomicWriter: this.readOnlyStageAtomicWriter,
+      });
+      const integrity = new IntegrityCheckService({
+        profile: stagedProfile,
+        vaults: stagedVaults,
+        attachments: stagedAttachments,
+        audit: stagedAudit,
+        now: this.now,
+      });
+      const report = await integrity.scan({
+        assertAuthorized: assertActive,
+        skipPublicFactorVerification: recoveryVerification,
+        yieldControl: async () => {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          await this.assertDryRunWorkspaceTree(workspace);
+          assertActive();
+        },
+      });
+      await this.assertDryRunWorkspaceTree(workspace);
+      assertActive();
+      if (!report.success) {
+        throw new VaultaError(
+          'CORRUPT_DATA',
+          'Die Sicherung hat die semantische Pruefung nicht bestanden.',
+        );
+      }
+    } finally {
+      stagedVaults.clearCachedDocuments();
+      stagedProfile.lock();
+      this.crypto.erase(additionalSecret);
+    }
+  }
+
+  private async createDryRunWorkspace(): Promise<DryRunWorkspace> {
+    const configuredRoot = this.dryRunTemporaryRoot;
+    const canonicalProfileRoot = await realpath(this.rootDir);
+    const projectedTemporaryRoot = await resolveProjectedCanonicalPath(configuredRoot);
+    if (isInsideOrEqual(canonicalProfileRoot, projectedTemporaryRoot)) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der Arbeitsbereich fuer den Restore-Probelauf darf nicht im aktiven Profil liegen.',
+      );
+    }
+    await mkdir(configuredRoot, { recursive: true, mode: 0o700 });
+    const rootInfo = await lstat(configuredRoot);
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der Arbeitsbereich fuer den Restore-Probelauf ist nicht sicher verfuegbar.',
+      );
+    }
+    const canonicalTemporaryRoot = await realpath(configuredRoot);
+    if (isInsideOrEqual(canonicalProfileRoot, canonicalTemporaryRoot)) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der Arbeitsbereich fuer den Restore-Probelauf darf nicht im aktiven Profil liegen.',
+      );
+    }
+    const stageRoot = await mkdtemp(path.join(canonicalTemporaryRoot, 'kryptris-restore-dry-run-'));
+    try {
+      await chmod(stageRoot, 0o700);
+      const stageInfo = await lstat(stageRoot);
+      if (stageInfo.isSymbolicLink() || !stageInfo.isDirectory()) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Restore-Probelauf konnte keinen sicheren Arbeitsbereich anlegen.',
+        );
+      }
+      const canonicalStageRoot = await realpath(stageRoot);
+      const verifiedStageInfo = await lstat(stageRoot);
+      if (
+        verifiedStageInfo.isSymbolicLink() ||
+        !verifiedStageInfo.isDirectory() ||
+        !sameDirectoryIdentity(stageInfo, verifiedStageInfo) ||
+        !sameCanonicalPath(path.dirname(canonicalStageRoot), canonicalTemporaryRoot) ||
+        !path.basename(canonicalStageRoot).startsWith('kryptris-restore-dry-run-')
+      ) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Restore-Probelauf konnte keinen sicheren Arbeitsbereich anlegen.',
+        );
+      }
+      return {
+        stageRoot,
+        canonicalStageRoot,
+        stageRootIdentity: { dev: stageInfo.dev, ino: stageInfo.ino },
+        temporaryRoot: canonicalTemporaryRoot,
+      };
+    } catch (error) {
+      await rm(stageRoot, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * Creates only missing parent directories below the canonical dry-run root and
+   * rejects every symbolic-link or junction alias before a backup record can be
+   * opened for writing.  A FileHandle is then used for all record data, so a
+   * later path swap cannot redirect already-opened output.
+   */
+  private async openDryRunOutput(
+    workspace: DryRunWorkspace,
+    safePath: string,
+  ): Promise<FileHandle> {
+    const segments = safePath.split('/');
+    const parentSegments = segments.slice(0, -1);
+    await this.ensureDryRunDirectoryHierarchy(workspace, parentSegments);
+    const outputPath = resolveInside(workspace.canonicalStageRoot, ...segments);
+    const existing = await lstat(outputPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (existing !== null) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der Restore-Probelauf enthält bereits einen unerwarteten Ausgabepfad.',
+      );
+    }
+
+    await this.assertDryRunWorkspaceRoot(workspace);
+    const output = await open(
+      outputPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600,
+    );
+    let outputIdentity: DirectoryIdentity | null = null;
+    try {
+      const opened = await output.stat();
+      outputIdentity = { dev: opened.dev, ino: opened.ino };
+      const current = await lstat(outputPath);
+      await this.ensureDryRunDirectoryHierarchy(workspace, parentSegments);
+      const canonicalOutput = await realpath(outputPath);
+      const expectedOutput = resolveInside(workspace.canonicalStageRoot, ...segments);
+      if (
+        current.isSymbolicLink() ||
+        !current.isFile() ||
+        !sameDirectoryIdentity(outputIdentity, { dev: current.dev, ino: current.ino }) ||
+        !sameCanonicalPath(canonicalOutput, expectedOutput)
+      ) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Ein Restore-Ausgabepfad wurde während der Prüfung verändert.',
+        );
+      }
+      return output;
+    } catch (error) {
+      await output.close().catch(() => undefined);
+      if (outputIdentity !== null) {
+        await this.removeOpenedDryRunOutput(outputPath, outputIdentity);
+      }
+      throw error;
+    }
+  }
+
+  /** Reads the staged profile through a verified handle, never through a later path lookup. */
+  private async readDryRunStageProfileHeader(workspace: DryRunWorkspace): Promise<string> {
+    await this.assertDryRunWorkspaceRoot(workspace);
+    const profilePath = resolveInside(workspace.canonicalStageRoot, 'profile.json');
+    const initial = await lstat(profilePath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') {
+        throw new VaultaError('CORRUPT_DATA', 'Der Restore-Probelauf enthält keinen Profilheader.');
+      }
+      throw error;
+    });
+    if (initial.isSymbolicLink() || !initial.isFile()) {
+      throw new VaultaError('UNSAFE_PATH', 'Der Profilheader im Restore-Probelauf ist unsicher.');
+    }
+
+    const handle = await open(profilePath, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
+      (error) => {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Profilheader im Restore-Probelauf ist unsicher.',
+          null,
+          {
+            cause: error,
+          },
+        );
+      },
+    );
+    try {
+      const opened = await handle.stat();
+      const current = await lstat(profilePath);
+      await this.assertDryRunWorkspaceRoot(workspace);
+      const canonicalProfilePath = await realpath(profilePath);
+      if (
+        current.isSymbolicLink() ||
+        !current.isFile() ||
+        !sameDirectoryIdentity(
+          { dev: opened.dev, ino: opened.ino },
+          { dev: current.dev, ino: current.ino },
+        ) ||
+        !sameCanonicalPath(canonicalProfilePath, profilePath)
+      ) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Profilheader im Restore-Probelauf wurde verändert.',
+        );
+      }
+      return (await handle.readFile()).toString('utf8');
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  }
+
+  private async ensureDryRunDirectoryHierarchy(
+    workspace: DryRunWorkspace,
+    segments: readonly string[],
+  ): Promise<void> {
+    await this.assertDryRunWorkspaceRoot(workspace);
+    for (let index = 0; index < segments.length; index += 1) {
+      const expectedDirectory = resolveInside(
+        workspace.canonicalStageRoot,
+        ...segments.slice(0, index + 1),
+      );
+      const existing = await lstat(expectedDirectory).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (existing === null) {
+        await mkdir(expectedDirectory, { recursive: false, mode: 0o700 }).catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code !== 'EEXIST') throw error;
+          },
+        );
+      }
+
+      await this.assertDryRunWorkspaceRoot(workspace);
+      const verified = await lstat(expectedDirectory);
+      if (verified.isSymbolicLink() || !verified.isDirectory()) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Restore-Probelauf enthält eine unzulässige Verzeichnisverknüpfung.',
+        );
+      }
+      const canonicalDirectory = await realpath(expectedDirectory);
+      if (!sameCanonicalPath(canonicalDirectory, expectedDirectory)) {
+        throw new VaultaError(
+          'UNSAFE_PATH',
+          'Der Restore-Probelauf enthält ein Verzeichnis außerhalb des Arbeitsbereichs.',
+        );
+      }
+    }
+  }
+
+  private async assertDryRunWorkspaceRoot(workspace: DryRunWorkspace): Promise<void> {
+    const [temporaryInfo, stageInfo] = await Promise.all([
+      lstat(workspace.temporaryRoot),
+      lstat(workspace.stageRoot),
+    ]);
+    if (
+      temporaryInfo.isSymbolicLink() ||
+      !temporaryInfo.isDirectory() ||
+      stageInfo.isSymbolicLink() ||
+      !stageInfo.isDirectory() ||
+      !sameDirectoryIdentity(workspace.stageRootIdentity, {
+        dev: stageInfo.dev,
+        ino: stageInfo.ino,
+      })
+    ) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der temporäre Restore-Arbeitsbereich wurde während der Prüfung verändert.',
+      );
+    }
+
+    const [canonicalTemporaryRoot, canonicalStageRoot] = await Promise.all([
+      realpath(workspace.temporaryRoot),
+      realpath(workspace.stageRoot),
+    ]);
+    if (
+      !sameCanonicalPath(canonicalTemporaryRoot, workspace.temporaryRoot) ||
+      !sameCanonicalPath(canonicalStageRoot, workspace.canonicalStageRoot) ||
+      !sameCanonicalPath(path.dirname(canonicalStageRoot), workspace.temporaryRoot) ||
+      !path.basename(canonicalStageRoot).startsWith('kryptris-restore-dry-run-')
+    ) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der temporäre Restore-Arbeitsbereich wurde während der Prüfung verändert.',
+      );
+    }
+  }
+
+  private async assertDryRunWorkspaceTree(workspace: DryRunWorkspace): Promise<void> {
+    await this.assertDryRunWorkspaceRoot(workspace);
+    const inspectDirectory = async (directory: string): Promise<void> => {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const candidate = resolveInside(directory, entry.name);
+        const info = await lstat(candidate);
+        if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+          throw new VaultaError(
+            'UNSAFE_PATH',
+            'Der Restore-Probelauf enthält einen unsicheren Arbeitsbereichseintrag.',
+          );
+        }
+        const canonicalCandidate = await realpath(candidate);
+        if (!sameCanonicalPath(canonicalCandidate, candidate)) {
+          throw new VaultaError(
+            'UNSAFE_PATH',
+            'Der Restore-Probelauf enthält einen Arbeitsbereichseintrag außerhalb des Stagings.',
+          );
+        }
+        if (info.isDirectory()) await inspectDirectory(candidate);
+      }
+    };
+    await inspectDirectory(workspace.canonicalStageRoot);
+    await this.assertDryRunWorkspaceRoot(workspace);
+  }
+
+  private async removeOpenedDryRunOutput(
+    outputPath: string,
+    openedIdentity: DirectoryIdentity,
+  ): Promise<void> {
+    const current = await lstat(outputPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (
+      current !== null &&
+      !current.isSymbolicLink() &&
+      current.isFile() &&
+      sameDirectoryIdentity(openedIdentity, { dev: current.dev, ino: current.ino })
+    ) {
+      await rm(outputPath, { force: true }).catch(() => undefined);
+    }
+  }
+
+  private async removeDryRunWorkspace(workspace: DryRunWorkspace): Promise<void> {
+    const resolvedStage = path.resolve(workspace.stageRoot);
+    const resolvedTemporaryRoot = path.resolve(workspace.temporaryRoot);
+    const relativeStage = path.relative(resolvedTemporaryRoot, resolvedStage);
+    if (
+      !isInsideOrEqual(resolvedTemporaryRoot, resolvedStage) ||
+      path.dirname(resolvedStage) !== resolvedTemporaryRoot ||
+      !path.basename(relativeStage).startsWith('kryptris-restore-dry-run-')
+    ) {
+      throw new VaultaError('UNSAFE_PATH', 'Der temporäre Restore-Arbeitsbereich ist ungueltig.');
+    }
+    const info = await lstat(resolvedStage).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (info === null) return;
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der temporäre Restore-Arbeitsbereich wurde waehrend der Pruefung veraendert.',
+      );
+    }
+    await rm(resolvedStage, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
+  }
+
   private restorePaths(targetRoot: string): {
     stageRoot: string;
     rollbackRoot: string;
@@ -1109,9 +1757,11 @@ export class BackupService {
   private async processBackup(
     backupPath: string,
     credential: BackupCredential,
-    stageRoot: string | null,
-    options: { accessKeyOverride?: Buffer } = {},
+    stageRoot: string | DryRunWorkspace | null,
+    options: ProcessBackupOptions = {},
   ): Promise<{ header: BackupHeader; manifest: BackupManifest }> {
+    const assertAuthorized = options.assertAuthorized ?? (() => undefined);
+    assertAuthorized();
     const input = await open(backupPath, constants.O_RDONLY).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         throw new VaultaError('NOT_FOUND', 'Die Sicherungsdatei wurde nicht gefunden.');
@@ -1123,7 +1773,9 @@ export class BackupService {
     let current: ProcessingFile | null = null;
 
     try {
+      assertAuthorized();
       const fileInfo = await input.stat();
+      assertAuthorized();
       const parsedHeader = await this.readBackupHeaderFromHandle(input);
       const { header, headerBytes, dataOffset } = parsedHeader;
       accessKey =
@@ -1161,6 +1813,7 @@ export class BackupService {
       let manifest: BackupManifest | null = null;
 
       while (position < fileInfo.size) {
+        assertAuthorized();
         const recordHeader = await readExact(input, RECORD_HEADER_BYTES, position);
         position += RECORD_HEADER_BYTES;
         const type = recordHeader.readUInt8(0);
@@ -1220,13 +1873,19 @@ export class BackupService {
             seenPaths.add(safePath);
             let output: FileHandle | null = null;
             if (stageRoot !== null) {
-              const outputPath = resolveInside(stageRoot, ...safePath.split('/'));
-              await mkdir(path.dirname(outputPath), { recursive: true });
-              output = await open(
-                outputPath,
-                constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-                0o600,
-              );
+              assertAuthorized();
+              if (typeof stageRoot === 'string') {
+                const outputPath = resolveInside(stageRoot, ...safePath.split('/'));
+                await mkdir(path.dirname(outputPath), { recursive: true });
+                assertAuthorized();
+                output = await open(
+                  outputPath,
+                  constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+                  0o600,
+                );
+              } else {
+                output = await this.openDryRunOutput(stageRoot, safePath);
+              }
             }
             current = {
               entry: { path: safePath, size: start.size, sha256: '' },
@@ -1290,9 +1949,11 @@ export class BackupService {
         } finally {
           this.crypto.erase(plaintext);
         }
+        assertAuthorized();
         expectedIndex += 1;
       }
 
+      assertAuthorized();
       if (manifest === null || current !== null) {
         throw new VaultaError('CORRUPT_DATA', 'Der authentifizierte Backup-Abschluss fehlt.');
       }

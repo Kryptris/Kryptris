@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-13T01:41:55.134Z",
+  "dataset": "synthetic-non-secret-v1",
+  "scope": {
+    "process": "main",
+    "entryList": "EntryViewService.listAsync: cold list and fresh search with cached security report",
+    "securityScan": "SecurityCheckService.scanAsync: full scan and cooperative authorization cancellation",
+    "duplicateScan": "DuplicateService.scan: full scan and cooperative AbortSignal cancellation"
+  },
+  "environment": {
+    "node": "v24.14.0",
+    "platform": "win32",
+    "osRelease": "10.0.26200",
+    "architecture": "x64",
+    "cpuModel": "AMD Ryzen 5 7600X 6-Core Processor             ",
+    "logicalCpuCount": 12,
+    "totalMemoryBytes": 33244930048,
+    "freeMemoryBytes": 10118193152
+  },
+  "datasets": [
+    {
+      "entryCount": 1000,
+      "entryList": {
+        "coldList": {
+          "durationMs": 410.068,
+          "resultCount": 1000
+        },
+        "searchWithCachedSecurityReport": {
+          "durationMs": 3.332,
+          "resultCount": 1,
+          "securityReportCache": "warm",
+          "searchResultCache": "not-cached"
+        }
+      },
+      "securityScan": {
+        "batchScheduling": {
+          "usesProductionDefault": true,
+          "explicitBatchSize": null
+        },
+        "fullScan": {
+          "durationMs": 348.758,
+          "findingCount": 2004,
+          "progressEvents": 1001,
+          "yieldCount": 100
+        },
+        "cancellation": {
+          "durationMs": 2.53,
+          "cancelled": true,
+          "timeToFirstYieldMs": 2.367,
+          "yieldCount": 1
+        }
+      },
+      "duplicateScan": {
+        "fullScan": {
+          "durationMs": 23.04,
+          "activeEntryCount": 1000,
+          "candidateCount": 5,
+          "progressEvents": 11,
+          "truncated": false,
+          "yieldCount": 7
+        },
+        "cancellation": {
+          "durationMs": 2.022,
+          "cancelled": true,
+          "timeToFirstYieldMs": 1.953,
+          "yieldCount": 1
+        }
+      }
+    },
+    {
+      "entryCount": 5000,
+      "entryList": {
+        "coldList": {
+          "durationMs": 4388.8,
+          "resultCount": 5000
+        },
+        "searchWithCachedSecurityReport": {
+          "durationMs": 15.948,
+          "resultCount": 1,
+          "securityReportCache": "warm",
+          "searchResultCache": "not-cached"
+        }
+      },
+      "securityScan": {
+        "batchScheduling": {
+          "usesProductionDefault": true,
+          "explicitBatchSize": null
+        },
+        "fullScan": {
+          "durationMs": 4473.648,
+          "findingCount": 10020,
+          "progressEvents": 5001,
+          "yieldCount": 500
+        },
+        "cancellation": {
+          "durationMs": 2.432,
+          "cancelled": true,
+          "timeToFirstYieldMs": 2.333,
+          "yieldCount": 1
+        }
+      },
+      "duplicateScan": {
+        "fullScan": {
+          "durationMs": 79.901,
+          "activeEntryCount": 5000,
+          "candidateCount": 25,
+          "progressEvents": 43,
+          "truncated": false,
+          "yieldCount": 39
+        },
+        "cancellation": {
+          "durationMs": 3.225,
+          "cancelled": true,
+          "timeToFirstYieldMs": 3.153,
+          "yieldCount": 1
+        }
+      }
+    },
+    {
+      "entryCount": 10000,
+      "entryList": {
+        "coldList": {
+          "durationMs": 9968.047,
+          "resultCount": 10000
+        },
+        "searchWithCachedSecurityReport": {
+          "durationMs": 30.71,
+          "resultCount": 1,
+          "securityReportCache": "warm",
+          "searchResultCache": "not-cached"
+        }
+      },
+      "securityScan": {
+        "batchScheduling": {
+          "usesProductionDefault": true,
+          "explicitBatchSize": null
+        },
+        "fullScan": {
+          "durationMs": 9875.643,
+          "findingCount": 20039,
+          "progressEvents": 10001,
+          "yieldCount": 1000
+        },
+        "cancellation": {
+          "durationMs": 5.928,
+          "cancelled": true,
+          "timeToFirstYieldMs": 4.93,
+          "yieldCount": 1
+        }
+      },
+      "duplicateScan": {
+        "fullScan": {
+          "durationMs": 153.253,
+          "activeEntryCount": 10000,
+          "candidateCount": 50,
+          "progressEvents": 82,
+          "truncated": false,
+          "yieldCount": 78
+        },
+        "cancellation": {
+          "durationMs": 7.107,
+          "cancelled": true,
+          "timeToFirstYieldMs": 5.363,
+          "yieldCount": 1
+        }
+      }
+    }
+  ]
+}

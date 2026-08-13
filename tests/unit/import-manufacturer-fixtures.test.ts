@@ -4,10 +4,12 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { ImportService } from '../../src/main/services/import-service';
-import type { ImportFormat } from '../../src/shared/models';
+
+type SupportedFixtureFormat = Parameters<ImportService['preview']>[0]['format'];
+type DetectedFixtureFormat = ReturnType<ImportService['detectFormat']>;
 
 interface FixtureExpectation {
-  format: ImportFormat;
+  format: SupportedFixtureFormat;
   file: string;
   title: string;
   username: string;
@@ -15,7 +17,8 @@ interface FixtureExpectation {
   website: string;
   folderName: string;
   note: string;
-  detectedAs?: ImportFormat;
+  totpSecret?: string;
+  detectedAs?: DetectedFixtureFormat;
 }
 
 const fixtures: FixtureExpectation[] = [
@@ -106,6 +109,41 @@ const fixtures: FixtureExpectation[] = [
     note: 'Aus Proton Pass exportiert',
     detectedAs: 'protonpass-json',
   },
+  {
+    format: 'dashlane-csv',
+    file: 'dashlane-credentials.csv',
+    title: 'Dashlane Portal',
+    username: 'dash-user',
+    password: 'fixture-only-dashlane-password',
+    website: 'https://dashlane.example',
+    folderName: 'Arbeit',
+    note: 'Aus Dashlane exportiert',
+    totpSecret: 'JBSWY3DPEHPK3PXP',
+    detectedAs: 'dashlane-csv',
+  },
+  {
+    format: 'nordpass-csv',
+    file: 'nordpass.csv',
+    title: 'NordPass Portal',
+    username: 'nord-user',
+    password: 'fixture-only-nordpass-password',
+    website: 'https://nordpass.example',
+    folderName: 'Privat',
+    note: 'Aus NordPass exportiert',
+    totpSecret: 'JBSWY3DPEHPK3PXP',
+    detectedAs: 'nordpass-csv',
+  },
+  {
+    format: 'roboform-csv',
+    file: 'roboform.csv',
+    title: 'RoboForm Portal',
+    username: 'robo-user',
+    password: 'fixture-only-roboform-password',
+    website: 'https://roboform.example',
+    folderName: 'Arbeit',
+    note: 'Aus RoboForm exportiert',
+    detectedAs: 'roboform-csv',
+  },
 ];
 
 function fixture(file: string): string {
@@ -136,6 +174,9 @@ describe('Repräsentative Hersteller-Import-Fixtures', () => {
       password: expected.password,
       websites: [expected.website],
     });
+    if (expected.totpSecret !== undefined) {
+      expect(data.value.totp).toMatchObject({ secret: expected.totpSecret });
+    }
     if (expected.detectedAs !== undefined) {
       expect(service.detectFormat(expected.file, content)).toBe(expected.detectedAs);
     }
@@ -193,5 +234,32 @@ describe('Repräsentative Hersteller-Import-Fixtures', () => {
         order: 1,
       }),
     ]);
+  });
+
+  it('erkennt Formate nur aus dem Inhalt, nie aus Dateiname oder Endung', () => {
+    const service = new ImportService();
+    const dashlane = fixture('dashlane-credentials.csv');
+    const generic = [
+      'title,username,password,url',
+      'Beliebiger Eintrag,anonymous-user,fixture-only-value,https://generic.example',
+    ].join('\n');
+
+    expect(service.detectFormat('umbenannt.txt', dashlane)).toBe('dashlane-csv');
+    expect(service.detectFormat('dashlane-export.csv', generic)).toBe('generic-csv');
+    expect(service.detectFormat('enpass.csv', generic)).toBe('generic-csv');
+  });
+
+  it('lehnt eine als Herstellerformat deklarierte Datei ohne passende Inhalts-Signatur ab', () => {
+    const service = new ImportService();
+    expect(() =>
+      service.preview({
+        format: 'roboform-csv',
+        sourceName: 'roboform.csv',
+        content: [
+          'title,username,password,url',
+          'Beliebiger Eintrag,anonymous-user,fixture-only-value,https://generic.example',
+        ].join('\n'),
+      }),
+    ).toThrow(/dokumentierte Spaltenstruktur/u);
   });
 });

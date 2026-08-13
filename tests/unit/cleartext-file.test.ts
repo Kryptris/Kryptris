@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { writeExclusiveCleartextFile } from '../../src/main/storage/cleartext-file';
 
@@ -64,5 +64,65 @@ describe('Direkte Klartextexporte', () => {
       { replaceExisting: true },
     );
     expect(await readFile(destination, 'utf8')).toBe('nach bestaetigtem Ueberschreiben');
+  });
+
+  it('verweigert einen direkten Zielpfad unter einer geschuetzten Wurzel vor jeder Aenderung', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'vaulta-cleartext-forbidden-direct-'));
+    roots.push(root);
+    const destination = path.join(root, 'integrity-report.json');
+    const nestedDestination = path.join(root, 'new-directory', 'integrity-report.json');
+    const sentinel = 'geschuetzter-dateiinhalt';
+    const writer = vi.fn();
+    await writeFile(destination, sentinel, { encoding: 'utf8' });
+
+    await expect(
+      writeExclusiveCleartextFile(destination, writer, {
+        replaceExisting: true,
+        forbiddenRoots: [root],
+      }),
+    ).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+    await expect(
+      writeExclusiveCleartextFile(nestedDestination, writer, {
+        replaceExisting: true,
+        forbiddenRoots: [root],
+      }),
+    ).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+
+    expect(writer).not.toHaveBeenCalled();
+    expect(await readFile(destination, 'utf8')).toBe(sentinel);
+    expect(await readdir(root)).toEqual(['integrity-report.json']);
+  });
+
+  it('verweigert einen Junction- oder Symlink-Alias in eine geschuetzte Wurzel ohne Restdatei', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'vaulta-cleartext-forbidden-alias-'));
+    roots.push(root);
+    const protectedRoot = path.join(root, 'protected');
+    const exportRoot = path.join(root, 'exports');
+    await Promise.all([mkdir(protectedRoot), mkdir(exportRoot)]);
+    const alias = path.join(exportRoot, 'protected-alias');
+    await symlink(protectedRoot, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const destination = path.join(alias, 'integrity-report.json');
+    const nestedDestination = path.join(alias, 'new-directory', 'integrity-report.json');
+    const sentinelPath = path.join(protectedRoot, 'integrity-report.json');
+    const sentinel = 'nicht-ueberschreiben';
+    const writer = vi.fn();
+    await writeFile(sentinelPath, sentinel, { encoding: 'utf8' });
+
+    await expect(
+      writeExclusiveCleartextFile(destination, writer, {
+        replaceExisting: true,
+        forbiddenRoots: [protectedRoot],
+      }),
+    ).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+    await expect(
+      writeExclusiveCleartextFile(nestedDestination, writer, {
+        replaceExisting: true,
+        forbiddenRoots: [protectedRoot],
+      }),
+    ).rejects.toMatchObject({ code: 'UNSAFE_PATH' });
+
+    expect(writer).not.toHaveBeenCalled();
+    expect(await readFile(sentinelPath, 'utf8')).toBe(sentinel);
+    expect(await readdir(protectedRoot)).toEqual(['integrity-report.json']);
   });
 });

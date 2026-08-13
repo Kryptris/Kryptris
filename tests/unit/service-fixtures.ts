@@ -4,6 +4,7 @@ import type {
   VaultDocument,
   VaultEntry,
 } from '../../src/shared/models';
+import { createDefaultEntryLifecycleMetadata } from '../../src/shared/models';
 
 export interface CredentialFixtureOptions {
   id?: string;
@@ -41,6 +42,7 @@ export function credentialEntry(options: CredentialFixtureOptions = {}): VaultEn
         appNames: [],
       },
     },
+    lifecycle: createDefaultEntryLifecycleMetadata(),
     createdAt: options.createdAt ?? '2025-01-01T00:00:00.000Z',
     updatedAt: options.updatedAt ?? '2025-01-01T00:00:00.000Z',
     secretChangedAt: options.secretChangedAt ?? '2025-01-01T00:00:00.000Z',
@@ -70,7 +72,7 @@ export function sshEntry(passphrase = ''): VaultEntry {
 
 export function vaultDocument(entries: VaultEntry[]): VaultDocument {
   return {
-    formatVersion: 1,
+    formatVersion: 2,
     id: 'vault-1',
     name: 'Privat',
     color: '#22d3c5',

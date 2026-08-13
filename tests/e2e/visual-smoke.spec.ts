@@ -141,6 +141,69 @@ test('hält das Setup in der minimalen Fenstergröße vollständig bedienbar', a
   });
 });
 
+test('hält die Sicherheitszentrale bei 200-Prozent-äquivalenter Breite bedienbar', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 720, height: 800 });
+  await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' });
+  await page.addInitScript(installSyntheticVaultaApi, 'workspace');
+
+  const response = await page.goto(rendererOrigin, { waitUntil: 'networkidle' });
+  expect(response?.ok()).toBe(true);
+
+  await page.getByRole('button', { name: 'Navigation öffnen' }).click();
+  await page.getByRole('button', { name: 'Sicherheitszentrale' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Sicherheitszentrale' })).toBeVisible();
+  await expect(page.getByText(/keine Aussage über Malware/u)).toBeVisible();
+  await expect(page.getByLabel(/Lokaler Vorsorgewert 78 von 100/u)).toBeVisible();
+
+  const recoveryPanel = page
+    .getByRole('heading', { name: 'Wiederherstellungsbereitschaft' })
+    .locator('xpath=ancestor::section[1]');
+  await recoveryPanel.getByRole('button', { name: 'Schlüssel lokal testen' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Wiederherstellungsschlüssel testen' });
+  await dialog.getByLabel('Wiederherstellungsschlüssel').fill('TEST-SCHLUESSEL-NUR-E2E');
+  await dialog.getByRole('button', { name: 'Schlüssel lokal prüfen' }).click();
+  await expect(dialog).not.toBeVisible();
+
+  const noHorizontalOverflow = await page
+    .locator('.security-center')
+    .evaluate((element) => element.scrollWidth <= element.clientWidth);
+  expect(noHorizontalOverflow).toBe(true);
+
+  const screenshotPath = testInfo.outputPath('kryptris-security-center-scaled.png');
+  await page.screenshot({
+    path: screenshotPath,
+    fullPage: true,
+    animations: 'disabled',
+    caret: 'hide',
+  });
+  await testInfo.attach('kryptris-security-center-scaled', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+});
+
+test('durchläuft die lokale Dubletten- und Datenqualitätsprüfung', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' });
+  await page.addInitScript(installSyntheticVaultaApi, 'workspace');
+
+  const response = await page.goto(rendererOrigin, { waitUntil: 'networkidle' });
+  expect(response?.ok()).toBe(true);
+
+  await page.getByRole('button', { name: 'Datenpflege' }).click();
+  await expect(page.getByRole('heading', { name: 'Dubletten und Datenqualität' })).toBeVisible();
+  await page.getByRole('button', { name: 'Dubletten prüfen', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Keine möglichen Dubletten' })).toBeVisible();
+
+  await page.getByRole('tab', { name: /Datenqualität/u }).click();
+  await page.getByRole('button', { name: 'Datenqualität prüfen', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Keine Datenqualitätsbefunde' })).toBeVisible();
+  await expect(page.getByText('Die Prüfung hat keinen Netzwerkzugriff verwendet.')).toBeVisible();
+});
+
 test('öffnet in Chromium einen neuen Zugangsdaten-Eintrag mit stabilen Formularfeldern', async ({
   page,
 }) => {
@@ -162,12 +225,39 @@ test('öffnet in Chromium einen neuen Zugangsdaten-Eintrag mit stabilen Formular
   await expect(dialog.locator('input[name="password"]')).toHaveValue('Smoke-Test-Passwort!123');
 });
 
+test('virtualisiert einen synthetischen Tresor mit 10.000 EintrÃ¤gen und behÃ¤lt die Tastaturfokussierung', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' });
+  await page.addInitScript(installSyntheticVaultaApi, 'large-vault');
+
+  const response = await page.goto(rendererOrigin, { waitUntil: 'networkidle' });
+  expect(response?.ok()).toBe(true);
+
+  const entryList = page.locator('.entry-list[role="listbox"]');
+  await expect(entryList).toBeVisible();
+  const initialOptionCount = await entryList.getByRole('option').count();
+  expect(initialOptionCount).toBeGreaterThan(0);
+  expect(initialOptionCount).toBeLessThan(40);
+
+  await entryList.getByRole('option').first().focus();
+  await page.keyboard.press('End');
+  await expect(entryList.getByText('Synthetischer Eintrag 10000')).toBeVisible();
+  await expect(page.locator('.entry-row:focus')).toContainText('Synthetischer Eintrag 10000');
+
+  await page.getByPlaceholder('Tresor durchsuchen').fill('Eintrag 09999');
+  await expect(entryList.getByText('Synthetischer Eintrag 09999')).toBeVisible();
+  await expect(entryList.getByRole('option')).toHaveCount(1);
+});
+
 /**
  * Läuft vollständig im Browserkontext. Die Bridge enthält ausschließlich statische
  * Beispieldaten und berührt weder Electron noch das lokale Vaulta-Datenverzeichnis.
  */
 function installSyntheticVaultaApi(mode: string) {
   const now = '2026-07-14T10:30:00.000Z';
+  const syntheticEntryCount = mode === 'large-vault' ? 10_000 : 4;
   const settings = {
     autoLockSeconds: 300,
     lockOnMinimize: false,
@@ -176,19 +266,27 @@ function installSyntheticVaultaApi(mode: string) {
     clipboardClearSeconds: 30,
     requireMasterForReveal: false,
     contentProtection: true,
+    minimizeToTray: false,
+    closeToTray: false,
+    startWithWindows: false,
+    startMinimized: false,
+    focusMode: false,
+    localReminders: { rotation: false, expiry: false, backup: false },
+    onboardingCompleted: true,
     attachmentMaxBytes: 104_857_600,
     backupFolder: null,
     automaticBackups: false,
     backupRotation: { daily: 7, weekly: 4, monthly: 6 },
     auditMaxEvents: 5_000,
     auditRetentionDays: 180,
+    trashRetentionDays: null,
     reducedMotion: true,
   };
   const vault = {
     id: 'synthetic-vault',
     name: 'Privat',
     color: '#25d2c8',
-    entryCount: 4,
+    entryCount: syntheticEntryCount,
     deletedCount: 0,
     updatedAt: now,
   };
@@ -215,7 +313,7 @@ function installSyntheticVaultaApi(mode: string) {
           autoLockAt: null,
         }
       : state;
-  const summaries = [
+  const defaultSummaries = [
     {
       id: 'github',
       vaultId: vault.id,
@@ -269,6 +367,25 @@ function installSyntheticVaultaApi(mode: string) {
       deletedAt: null,
     },
   ];
+  const summaries =
+    mode === 'large-vault'
+      ? Array.from({ length: syntheticEntryCount }, (_, index) => {
+          const ordinal = String(index + 1).padStart(5, '0');
+          return {
+            id: `synthetic-entry-${ordinal}`,
+            vaultId: vault.id,
+            type: 'credential',
+            title: `Synthetischer Eintrag ${ordinal}`,
+            subtitle: 'synthetisch@example.test',
+            favorite: false,
+            tags: [],
+            folderId: null,
+            securityState: 'good',
+            updatedAt: now,
+            deletedAt: null,
+          };
+        })
+      : defaultSummaries;
   const detail = {
     id: 'github',
     vaultId: vault.id,
@@ -307,6 +424,13 @@ function installSyntheticVaultaApi(mode: string) {
       },
     ],
     attachments: [],
+    lifecycle: {
+      rotationIntervalDays: 90,
+      nextRotationDate: '2026-10-12',
+      rotationExcluded: false,
+      twoFactorStatus: 'active',
+      expiryReminderDate: null,
+    },
     createdAt: '2026-01-10T09:00:00.000Z',
     updatedAt: now,
     deletedAt: null,
@@ -316,6 +440,105 @@ function installSyntheticVaultaApi(mode: string) {
     score: 92,
     counts: { good: 3, info: 1, warning: 0, critical: 0 },
     findings: [],
+    networkUsed: false,
+  };
+  const securityCenterReport = {
+    generatedAt: now,
+    score: 78,
+    cards: [
+      {
+        id: 'credentials',
+        severity: 'warning',
+        findingCodes: ['credential-findings'],
+        count: 1,
+        calculatedAt: now,
+        action: 'review-credentials',
+      },
+      {
+        id: 'data-quality',
+        severity: 'good',
+        findingCodes: [],
+        count: 0,
+        calculatedAt: now,
+        action: 'none',
+      },
+      {
+        id: 'factors',
+        severity: 'good',
+        findingCodes: [],
+        count: 0,
+        calculatedAt: now,
+        action: 'none',
+      },
+      {
+        id: 'backup',
+        severity: 'warning',
+        findingCodes: ['automatic-backup-disabled'],
+        count: 1,
+        calculatedAt: now,
+        action: 'open-backups',
+      },
+      {
+        id: 'recovery',
+        severity: 'warning',
+        findingCodes: ['recovery-never-tested'],
+        count: 1,
+        calculatedAt: now,
+        action: 'test-recovery',
+      },
+      {
+        id: 'kdf',
+        severity: 'good',
+        findingCodes: [],
+        count: 0,
+        calculatedAt: now,
+        action: 'none',
+      },
+      {
+        id: 'integrity',
+        severity: 'info',
+        findingCodes: ['integrity-not-run'],
+        count: 1,
+        calculatedAt: null,
+        action: 'run-integrity',
+      },
+      {
+        id: 'breach-list',
+        severity: 'good',
+        findingCodes: [],
+        count: 0,
+        calculatedAt: now,
+        action: 'none',
+      },
+    ],
+    entryFindings: [
+      {
+        id: 'security-finding-1',
+        vaultId: vault.id,
+        vaultName: vault.name,
+        entryId: 'mail',
+        entryTitle: 'Proton Mail',
+        kind: 'old',
+        severity: 'warning',
+        title: 'Passwort ist schon länger unverändert',
+        recommendation: 'Prüfe, ob eine Rotation beim Dienst sinnvoll ist.',
+      },
+    ],
+    networkUsed: false,
+  };
+  const recoveryReadiness = {
+    state: 'never-tested',
+    lastTestedAt: null,
+    lastTestSucceeded: null,
+    staleAfterDays: 180,
+  };
+  const breachListStatus = {
+    state: 'ready',
+    sourceLabel: 'Anonymisierte Testliste',
+    sourceDate: '2026-07-01',
+    importedAt: now,
+    recordCount: 42_000,
+    corpusSha256: '0'.repeat(64),
     networkUsed: false,
   };
   const noOp = () => Promise.resolve();
@@ -356,7 +579,14 @@ function installSyntheticVaultaApi(mode: string) {
       deleteFolder: noOp,
     },
     entries: {
-      list: () => Promise.resolve(summaries),
+      list: (query: { search?: string }) => {
+        const search = query.search?.trim().toLocaleLowerCase('de-DE') ?? '';
+        return Promise.resolve(
+          search.length === 0
+            ? summaries
+            : summaries.filter((entry) => entry.title.toLocaleLowerCase('de-DE').includes(search)),
+        );
+      },
       getDetail: () => Promise.resolve(detail),
       getEditModel: () => Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
       create: () => Promise.resolve(summaries[0]),
@@ -390,7 +620,50 @@ function installSyntheticVaultaApi(mode: string) {
       copy: noOp,
       importQr: () => Promise.resolve(null),
     },
-    security: { scan: () => Promise.resolve(securityReport) },
+    security: {
+      scan: () => Promise.resolve(securityReport),
+      scanCenter: () => Promise.resolve(securityCenterReport),
+      getRecoveryReadiness: () => Promise.resolve(recoveryReadiness),
+      testRecoveryReadiness: () =>
+        Promise.resolve({
+          ...recoveryReadiness,
+          state: 'ready',
+          lastTestedAt: now,
+          lastTestSucceeded: true,
+        }),
+      scanIntegrity: () =>
+        Promise.resolve({
+          reportId: 'synthetic-integrity-report',
+          generatedAt: now,
+          success: true,
+          scannedVaults: 1,
+          scannedEntries: summaries.length,
+          scannedAttachments: 0,
+          findings: [],
+          networkUsed: false,
+        }),
+      saveIntegrityReport: () => Promise.resolve(true),
+      getBreachListStatus: () => Promise.resolve(breachListStatus),
+      importBreachList: () => Promise.resolve(breachListStatus),
+      scanBreachList: () =>
+        Promise.resolve({
+          generatedAt: now,
+          checkedEntries: 2,
+          checkedPasswords: 2,
+          findings: [],
+          networkUsed: false,
+        }),
+      removeBreachList: () =>
+        Promise.resolve({
+          state: 'not-configured',
+          sourceLabel: null,
+          sourceDate: null,
+          importedAt: null,
+          recordCount: 0,
+          corpusSha256: null,
+          networkUsed: false,
+        }),
+    },
     backup: {
       create: () => Promise.resolve(null),
       restore: () => Promise.resolve(null),
@@ -398,6 +671,8 @@ function installSyntheticVaultaApi(mode: string) {
     },
     transfer: {
       previewImport: () => Promise.resolve(null),
+      previewDroppedImport: () => Promise.resolve(null),
+      onDroppedImport: noSubscription,
       remapImport: () => Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
       executeImport: () => Promise.resolve({ imported: 0, skipped: 0, entryIds: [] }),
       export: () => Promise.resolve(null),
@@ -465,6 +740,38 @@ function installSyntheticVaultaApi(mode: string) {
           networkUsed: false,
         }),
     },
+    productivity: {
+      batch: ({ entryIds }: { entryIds: string[] }) =>
+        Promise.resolve({ affected: entryIds.length, entryIds }),
+      listSavedViews: () => Promise.resolve([]),
+      saveSavedView: () => Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
+      reorderSavedViews: () => Promise.resolve([]),
+      deleteSavedView: noOp,
+      listTags: () => Promise.resolve([]),
+      renameTag: () => Promise.resolve(0),
+      mergeTags: () => Promise.resolve(0),
+      deleteTag: () => Promise.resolve(0),
+    },
+    quality: {
+      scanDuplicates: () =>
+        Promise.resolve({ candidates: [], activeEntryCount: summaries.length, truncated: false }),
+      describeDuplicateMerge: () =>
+        Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
+      mergeDuplicates: () => Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
+      scanDataQuality: () =>
+        Promise.resolve({
+          generatedAt: now,
+          vaultId: vault.id,
+          scannedEntries: summaries.length,
+          findings: [],
+          networkUsed: false,
+        }),
+      previewDataQualityFix: () =>
+        Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
+      applyDataQualityFix: () =>
+        Promise.reject(new Error('Im visuellen Smoke-Test nicht benötigt.')),
+      cancelJob: () => Promise.resolve(false),
+    },
     window: {
       minimize: noOp,
       toggleMaximize: () => Promise.resolve(false),
@@ -475,6 +782,7 @@ function installSyntheticVaultaApi(mode: string) {
       onStateChanged: noSubscription,
       onClipboardCleared: noSubscription,
       onBackgroundWarning: noSubscription,
+      onLocalJobProgress: noSubscription,
     },
   };
 

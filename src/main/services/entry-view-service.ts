@@ -6,9 +6,12 @@ import type {
   EntrySummary,
   SecurityFinding,
   SecuritySeverity,
+  SmartViewKind,
   VaultEntry,
 } from '../../shared/models';
+import { normalizeTagKey } from '../../shared/tags';
 import { entrySubtitle } from './entry-utils';
+import { EntryLifecycleService } from './entry-lifecycle-service';
 import { SecurityCheckService } from './security-check-service';
 
 const SEVERITY_ORDER: Record<SecuritySeverity, number> = {
@@ -17,6 +20,25 @@ const SEVERITY_ORDER: Record<SecuritySeverity, number> = {
   warning: 2,
   critical: 3,
 };
+
+/**
+ * Internal execution controls for a potentially large entry-list request.
+ * They are deliberately supplied by the main-process caller: renderers never
+ * receive decrypted entries or influence the authorization checkpoint.
+ */
+export interface EntryViewListAsyncOptions {
+  readonly assertAuthorized?: () => void;
+  readonly batchSize?: number;
+  readonly yieldControl?: () => Promise<void>;
+}
+
+interface ResolvedEntryViewListAsyncOptions {
+  readonly assertAuthorized: () => void;
+  readonly batchSize: number;
+  readonly yieldControl: () => Promise<void>;
+}
+
+const ASYNC_BATCH_SIZE = 10;
 
 function text(
   path: string,
@@ -309,8 +331,20 @@ function highestSeverity(findings: SecurityFinding[]): SecuritySeverity {
 
 export class EntryViewService {
   private readonly securityReports = new Map<string, SecurityFinding[]>();
+  private readonly pendingSecurityReports = new Map<string, Promise<SecurityFinding[]>>();
+  private securityReportGeneration = 0;
 
-  public constructor(private readonly security = new SecurityCheckService()) {}
+  public constructor(
+    private readonly security = new SecurityCheckService(),
+    private readonly now: () => Date = () => new Date(),
+    private readonly lifecycle = new EntryLifecycleService(),
+  ) {}
+
+  public clearCaches(): void {
+    this.securityReportGeneration += 1;
+    this.securityReports.clear();
+    this.pendingSecurityReports.clear();
+  }
 
   public list(entries: readonly VaultEntry[], query: EntryListQuery): EntrySummary[] {
     const report = this.securityReportFor(entries);
@@ -328,9 +362,16 @@ export class EntryViewService {
         if (query.view === 'favorites' && !entry.favorite) return false;
         if (query.view === 'recent' && entry.lastUsedAt === null) return false;
         if (query.types.length > 0 && !query.types.includes(entry.data.type)) return false;
-        if (query.tags.length > 0 && !query.tags.every((tag) => entry.tags.includes(tag)))
+        if (
+          query.tags.length > 0 &&
+          !query.tags.every((tag) =>
+            entry.tags.some((entryTag) => normalizeTagKey(entryTag) === normalizeTagKey(tag)),
+          )
+        )
           return false;
         if (query.folderId !== null && entry.folderId !== query.folderId) return false;
+        if (!matchesSmartView(entry, query.smartView ?? null, this.now(), this.lifecycle))
+          return false;
         const severity = highestSeverity(findingsByEntry.get(entry.id) ?? []);
         if (query.security.length > 0 && !query.security.includes(severity)) return false;
         return normalizedSearch.length === 0 || entrySearchText(entry).includes(normalizedSearch);
@@ -338,6 +379,9 @@ export class EntryViewService {
       .sort((left, right) => {
         if (query.view === 'recent') {
           return (right.lastUsedAt ?? '').localeCompare(left.lastUsedAt ?? '');
+        }
+        if (query.smartView === 'recently-changed') {
+          return right.updatedAt.localeCompare(left.updatedAt);
         }
         return left.title.localeCompare(right.title, 'de', { sensitivity: 'base' });
       })
@@ -356,12 +400,98 @@ export class EntryViewService {
       }));
   }
 
+  /**
+   * Lists large vaults without monopolising Electron's main-process event loop.
+   * The synchronous API remains available for small, local callers that cannot
+   * cross an asynchronous boundary. Every yield is immediately followed by the
+   * supplied authorization check so locking invalidates an in-flight result.
+   */
+  public async listAsync(
+    entries: readonly VaultEntry[],
+    query: EntryListQuery,
+    options: EntryViewListAsyncOptions = {},
+  ): Promise<EntrySummary[]> {
+    const execution = resolveAsyncOptions(options);
+    execution.assertAuthorized();
+    const report = await this.securityReportForAsync(entries, execution);
+    execution.assertAuthorized();
+
+    const findingsByEntry = new Map<string, SecurityFinding[]>();
+    for (let index = 0; index < report.findings.length; index += 1) {
+      execution.assertAuthorized();
+      const finding = report.findings[index]!;
+      const existing = findingsByEntry.get(finding.entryId) ?? [];
+      existing.push(finding);
+      findingsByEntry.set(finding.entryId, existing);
+      if (isBatchBoundary(index, execution)) await checkpoint(execution);
+    }
+    execution.assertAuthorized();
+
+    const normalizedSearch = query.search.trim().normalize('NFKC').toLocaleLowerCase('de');
+    const matchingEntries: VaultEntry[] = [];
+    for (let index = 0; index < entries.length; index += 1) {
+      execution.assertAuthorized();
+      const entry = entries[index]!;
+      const deleted = entry.deletedAt !== null;
+      const severity = highestSeverity(findingsByEntry.get(entry.id) ?? []);
+      const matches =
+        !(query.view === 'trash' ? !deleted : deleted) &&
+        !(query.view === 'favorites' && !entry.favorite) &&
+        !(query.view === 'recent' && entry.lastUsedAt === null) &&
+        !(query.types.length > 0 && !query.types.includes(entry.data.type)) &&
+        !(
+          query.tags.length > 0 &&
+          !query.tags.every((tag) =>
+            entry.tags.some((entryTag) => normalizeTagKey(entryTag) === normalizeTagKey(tag)),
+          )
+        ) &&
+        !(query.folderId !== null && entry.folderId !== query.folderId) &&
+        matchesSmartView(entry, query.smartView ?? null, this.now(), this.lifecycle) &&
+        !(query.security.length > 0 && !query.security.includes(severity)) &&
+        (normalizedSearch.length === 0 || entrySearchText(entry).includes(normalizedSearch));
+      if (matches) {
+        matchingEntries.push(entry);
+      }
+      if (isBatchBoundary(index, execution)) await checkpoint(execution);
+    }
+    execution.assertAuthorized();
+
+    matchingEntries.sort((left, right) => {
+      if (query.view === 'recent') {
+        return (right.lastUsedAt ?? '').localeCompare(left.lastUsedAt ?? '');
+      }
+      if (query.smartView === 'recently-changed') {
+        return right.updatedAt.localeCompare(left.updatedAt);
+      }
+      return left.title.localeCompare(right.title, 'de', { sensitivity: 'base' });
+    });
+    execution.assertAuthorized();
+
+    const summaries: EntrySummary[] = [];
+    for (let index = 0; index < matchingEntries.length; index += 1) {
+      execution.assertAuthorized();
+      const entry = matchingEntries[index]!;
+      summaries.push({
+        id: entry.id,
+        vaultId: entry.vaultId,
+        type: entry.data.type,
+        title: entry.title,
+        subtitle: entrySubtitle(entry),
+        favorite: entry.favorite,
+        tags: [...entry.tags],
+        folderId: entry.folderId,
+        securityState: highestSeverity(findingsByEntry.get(entry.id) ?? []),
+        updatedAt: entry.updatedAt,
+        deletedAt: entry.deletedAt,
+      });
+      if (isBatchBoundary(index, execution)) await checkpoint(execution);
+    }
+    execution.assertAuthorized();
+    return summaries;
+  }
+
   private securityReportFor(entries: readonly VaultEntry[]): { findings: SecurityFinding[] } {
-    const activeEntries = entries.filter((entry) => entry.deletedAt === null);
-    const revision = activeEntries
-      .map((entry) => `${entry.id}:${entry.updatedAt}:${entry.secretChangedAt}`)
-      .sort()
-      .join('|');
+    const { activeEntries, revision } = securityReportInput(entries);
     const cached = this.securityReports.get(revision);
     if (cached !== undefined) return { findings: cached };
 
@@ -369,6 +499,69 @@ export class EntryViewService {
     this.securityReports.clear();
     this.securityReports.set(revision, findings);
     return { findings };
+  }
+
+  private async securityReportForAsync(
+    entries: readonly VaultEntry[],
+    options: ResolvedEntryViewListAsyncOptions,
+  ): Promise<{ findings: SecurityFinding[] }> {
+    const { activeEntries, revision } = securityReportInput(entries);
+    options.assertAuthorized();
+    const cached = this.securityReports.get(revision);
+    if (cached !== undefined) {
+      options.assertAuthorized();
+      return { findings: cached };
+    }
+
+    const pending =
+      this.pendingSecurityReports.get(revision) ??
+      this.startSecurityReportScan(activeEntries, revision, options);
+    const findings = await pending;
+    options.assertAuthorized();
+    return { findings };
+  }
+
+  private startSecurityReportScan(
+    activeEntries: readonly VaultEntry[],
+    revision: string,
+    options: ResolvedEntryViewListAsyncOptions,
+  ): Promise<SecurityFinding[]> {
+    const generation = this.securityReportGeneration;
+    const pending = this.scanAndCacheSecurityReport(
+      activeEntries,
+      revision,
+      generation,
+      options,
+    ).finally(() => {
+      if (this.pendingSecurityReports.get(revision) === pending) {
+        this.pendingSecurityReports.delete(revision);
+      }
+    });
+    this.pendingSecurityReports.set(revision, pending);
+    return pending;
+  }
+
+  private async scanAndCacheSecurityReport(
+    activeEntries: readonly VaultEntry[],
+    revision: string,
+    generation: number,
+    options: ResolvedEntryViewListAsyncOptions,
+  ): Promise<SecurityFinding[]> {
+    const report = await this.security.scanAsync(activeEntries, {
+      assertAuthorized: options.assertAuthorized,
+      batchSize: options.batchSize,
+      yieldControl: options.yieldControl,
+    });
+    // Do not retain findings if the vault was locked or invalidated while the
+    // scanner yielded. A caller that waited on a shared request checks again.
+    options.assertAuthorized();
+    if (generation !== this.securityReportGeneration) {
+      throw new VaultaError('CANCELLED', 'Die Eintragsliste wurde zwischenzeitlich invalidiert.');
+    }
+    this.securityReports.clear();
+    this.securityReports.set(revision, report.findings);
+    options.assertAuthorized();
+    return report.findings;
   }
 
   public detail(entry: VaultEntry): EntryDetail {
@@ -383,6 +576,7 @@ export class EntryViewService {
       note: entry.note,
       fields: fieldsForEntry(entry),
       attachments: entry.attachments.map((attachment) => ({ ...attachment })),
+      lifecycle: { ...entry.lifecycle },
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
       deletedAt: entry.deletedAt,
@@ -442,4 +636,73 @@ export class EntryViewService {
     if (typeof raw === 'boolean') return raw ? 'Ja' : 'Nein';
     throw new VaultaError('NOT_FOUND', 'Das Feld wurde nicht gefunden.');
   }
+}
+
+function matchesSmartView(
+  entry: VaultEntry,
+  view: SmartViewKind | null,
+  now: Date,
+  lifecycle: EntryLifecycleService,
+): boolean {
+  switch (view) {
+    case null:
+      return true;
+    case 'recently-changed': {
+      const updatedAt = Date.parse(entry.updatedAt);
+      const age = now.getTime() - updatedAt;
+      return Number.isFinite(updatedAt) && age >= 0 && age <= 30 * 24 * 60 * 60 * 1_000;
+    }
+    case 'without-folder':
+      return entry.folderId === null;
+    case 'without-tags':
+      return entry.tags.length === 0;
+    case 'rotation-due':
+      return lifecycle.status(entry, now).rotationDue;
+    case 'without-two-factor':
+      return lifecycle.status(entry, now).twoFactorMissing;
+    case 'with-attachments':
+      return entry.attachments.length > 0;
+  }
+}
+
+function securityReportInput(entries: readonly VaultEntry[]): {
+  readonly activeEntries: VaultEntry[];
+  readonly revision: string;
+} {
+  const activeEntries = entries.filter((entry) => entry.deletedAt === null);
+  const revision = activeEntries
+    .map(
+      (entry) =>
+        `${entry.id}:${entry.updatedAt}:${entry.secretChangedAt}:${JSON.stringify(entry.lifecycle)}`,
+    )
+    .sort()
+    .join('|');
+  return { activeEntries, revision };
+}
+
+function resolveAsyncOptions(
+  options: EntryViewListAsyncOptions,
+): ResolvedEntryViewListAsyncOptions {
+  const batchSize = options.batchSize ?? ASYNC_BATCH_SIZE;
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 10_000) {
+    throw new VaultaError('INVALID_INPUT', 'Die Batchgröße der Eintragsliste ist ungültig.');
+  }
+  return {
+    assertAuthorized: options.assertAuthorized ?? (() => undefined),
+    batchSize,
+    yieldControl: options.yieldControl ?? yieldToEventLoop,
+  };
+}
+
+function isBatchBoundary(index: number, options: ResolvedEntryViewListAsyncOptions): boolean {
+  return (index + 1) % options.batchSize === 0;
+}
+
+async function checkpoint(options: ResolvedEntryViewListAsyncOptions): Promise<void> {
+  await options.yieldControl();
+  options.assertAuthorized();
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }

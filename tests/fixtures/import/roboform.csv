@@ -1,0 +1,2 @@
+Name,Url,Login,Pwd,Note,Folder,Rf_fields
+RoboForm Portal,https://roboform.example,robo-user,fixture-only-roboform-password,Aus RoboForm exportiert,Arbeit,custom=fixture-value

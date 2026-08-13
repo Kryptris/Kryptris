@@ -1,0 +1,2 @@
+name,url,username,password,note,cardholdername,cardnumber,cvc,expirydate,zipcode,folder,full_name,phone_number,email,address1,address2,city,country,state,totp,shared_folder
+NordPass Portal,https://nordpass.example,nord-user,fixture-only-nordpass-password,Aus NordPass exportiert,,,,,,Privat,,,,,,,,,JBSWY3DPEHPK3PXP,

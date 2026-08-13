@@ -7,11 +7,22 @@ import type {
   SecuritySeverity,
   VaultEntry,
 } from '../../shared/models';
+import { EntryLifecycleService } from './entry-lifecycle-service';
 import { evaluatePassword } from './password-strength';
 
 export interface SecurityScanOptions {
   now?: Date;
   oldAfterDays?: number;
+  batchSize?: number;
+  assertAuthorized?: () => void;
+  onProgress?: (progress: SecurityScanProgress) => void;
+  yieldControl?: () => Promise<void>;
+}
+
+export interface SecurityScanProgress {
+  readonly phase: 'entries';
+  readonly completed: number;
+  readonly total: number;
 }
 
 interface SecurityScanState {
@@ -27,6 +38,8 @@ const SENSITIVE_LABEL =
 const ASYNC_BATCH_SIZE = 10;
 
 export class SecurityCheckService {
+  public constructor(private readonly lifecycle = new EntryLifecycleService()) {}
+
   public scan(entries: readonly VaultEntry[], options: SecurityScanOptions = {}): SecurityReport {
     const state = this.createState(entries, options);
     for (const entry of state.activeEntries) this.inspectEntry(entry, state);
@@ -42,11 +55,31 @@ export class SecurityCheckService {
     options: SecurityScanOptions = {},
   ): Promise<SecurityReport> {
     const state = this.createState(entries, options);
-    for (let index = 0; index < state.activeEntries.length; index += 1) {
-      this.inspectEntry(state.activeEntries[index]!, state);
-      if ((index + 1) % ASYNC_BATCH_SIZE === 0) await yieldToEventLoop();
+    const batchSize = options.batchSize ?? ASYNC_BATCH_SIZE;
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 10_000) {
+      throw invalid('Die Batchgröße der Sicherheitsprüfung ist ungültig.');
     }
-    return this.finish(state);
+    const assertAuthorized = options.assertAuthorized ?? (() => undefined);
+    const yieldControl = options.yieldControl ?? yieldToEventLoop;
+    assertAuthorized();
+    options.onProgress?.({ phase: 'entries', completed: 0, total: state.activeEntries.length });
+    for (let index = 0; index < state.activeEntries.length; index += 1) {
+      assertAuthorized();
+      this.inspectEntry(state.activeEntries[index]!, state);
+      options.onProgress?.({
+        phase: 'entries',
+        completed: index + 1,
+        total: state.activeEntries.length,
+      });
+      if ((index + 1) % batchSize === 0) {
+        await yieldControl();
+        assertAuthorized();
+      }
+    }
+    assertAuthorized();
+    const report = this.finish(state);
+    assertAuthorized();
+    return report;
   }
 
   private createState(
@@ -69,6 +102,41 @@ export class SecurityCheckService {
   }
 
   private inspectEntry(entry: VaultEntry, state: SecurityScanState): void {
+    const lifecycle = this.lifecycle.status(entry, state.now);
+    if (lifecycle.rotationDue) {
+      state.findings.push(
+        finding(
+          entry,
+          'rotation-due',
+          'warning',
+          'Rotation fällig',
+          `Bestätige nach dem Ändern des Geheimnisses die Rotation${lifecycle.nextRotationDate ? ` (fällig seit ${lifecycle.nextRotationDate})` : ''}.`,
+        ),
+      );
+    }
+    if (lifecycle.twoFactorMissing) {
+      state.findings.push(
+        finding(
+          entry,
+          'two-factor-missing',
+          'info',
+          'Kein lokal bestätigter 2FA-Schutz',
+          'Prüfe den Anbieter und markiere den lokalen Zwei-Faktor-Status im Eintrag.',
+        ),
+      );
+    }
+    if (lifecycle.reminderDue) {
+      state.findings.push(
+        finding(
+          entry,
+          'expiry-reminder-due',
+          'warning',
+          'Ablauf-Erinnerung fällig',
+          'Prüfe Laufzeit oder Gültigkeit und aktualisiere anschließend das Erinnerungsdatum.',
+        ),
+      );
+    }
+
     const password = passwordOf(entry);
     if (password.length > 0) {
       const digest = createHash('sha256').update(password, 'utf8').digest('hex');

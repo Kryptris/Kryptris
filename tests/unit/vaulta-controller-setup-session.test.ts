@@ -44,11 +44,11 @@ vi.mock('../../src/main/services/profile-service', async (importOriginal) => {
   };
 });
 
-import { VaultaController } from '../../src/main/vaulta-controller';
+import { VaultaController, type DesktopSettingsPolicy } from '../../src/main/vaulta-controller';
 
 const PENDING_SETUP_TIMEOUT_MS = 5 * 60 * 1_000;
 
-function createController() {
+function createController(desktopSettingsPolicy?: DesktopSettingsPolicy) {
   return new VaultaController({
     rootDir: 'C:\\vaulta-controller-setup-test',
     version: 'test',
@@ -62,6 +62,7 @@ function createController() {
     onLocked: vi.fn(),
     onClipboardCleared: vi.fn(),
     onBackgroundWarning: vi.fn(),
+    ...(desktopSettingsPolicy === undefined ? {} : { desktopSettingsPolicy }),
   });
 }
 
@@ -72,12 +73,25 @@ function authenticateForSettings(controller: VaultaController): void {
       begin(): number;
       complete(profileUnlocked: boolean, epoch: number): void;
     };
-    vaults: { listVaults(): Promise<[]> };
+    vaults: { listVaults(): Promise<[]>; readVault(id: string): Promise<unknown> };
     createAuditService(): { record(): Promise<void> };
   };
   const epoch = internals.authentication.begin();
   internals.authentication.complete(true, epoch);
-  internals.vaults = { listVaults: () => Promise.resolve([]) };
+  internals.vaults = {
+    listVaults: () => Promise.resolve([]),
+    readVault: (id) =>
+      Promise.resolve({
+        formatVersion: 1,
+        id,
+        name: 'Test',
+        color: '#14b8a6',
+        createdAt: '2026-07-21T12:00:00.000Z',
+        updatedAt: '2026-07-21T12:00:00.000Z',
+        folders: [],
+        entries: [],
+      }),
+  };
   internals.createAuditService = () => ({ record: mocks.auditRecord });
 }
 
@@ -122,8 +136,8 @@ describe('VaultaController Pending-Setup-Sitzung', () => {
     vi.useRealTimers();
   });
 
-  function trackedController(): VaultaController {
-    const controller = createController();
+  function trackedController(desktopSettingsPolicy?: DesktopSettingsPolicy): VaultaController {
+    const controller = createController(desktopSettingsPolicy);
     controllers.push(controller);
     return controller;
   }
@@ -245,6 +259,90 @@ describe('VaultaController Pending-Setup-Sitzung', () => {
     ).resolves.toMatchObject({ autoLockSeconds: 1_800, backupFolder: selected });
     expect(mocks.verifyMasterPassword).toHaveBeenNthCalledWith(1, 'falsch');
     expect(mocks.verifyMasterPassword).toHaveBeenNthCalledWith(2, 'korrekt');
+  });
+
+  it('setzt die Windows-Policy nach einem fehlgeschlagenen Settings-Commit zurück', async () => {
+    const operations: string[] = [];
+    const apply = vi.fn((settings: Readonly<VaultaSettings>) => {
+      operations.push(settings.minimizeToTray ? 'neue-policy' : 'vorherige-policy');
+    });
+    const desktopSettingsPolicy: DesktopSettingsPolicy = {
+      apply,
+    };
+    mocks.setProtectedMetadata.mockImplementationOnce(() => {
+      operations.push('geschuetzter-commit');
+      return Promise.reject(
+        new Error('Geschuetzte Einstellungen konnten nicht gespeichert werden.'),
+      );
+    });
+    const controller = trackedController(desktopSettingsPolicy);
+    authenticateForSettings(controller);
+
+    await expect(
+      controller.updateSettings({
+        settings: { ...DEFAULT_SETTINGS, minimizeToTray: true },
+      }),
+    ).rejects.toThrow('Geschuetzte Einstellungen konnten nicht gespeichert werden.');
+
+    expect(operations).toEqual(['neue-policy', 'geschuetzter-commit', 'vorherige-policy']);
+    expect(apply).toHaveBeenNthCalledWith(1, expect.objectContaining({ minimizeToTray: true }));
+    expect(apply).toHaveBeenNthCalledWith(2, DEFAULT_SETTINGS);
+    expect(mocks.setProtectedMetadata).toHaveBeenCalledTimes(1);
+    expect(controller.getSettings()).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it('verändert bei falschem Master-Passwort keine Batch-Purge-Auswahl', async () => {
+    const controller = trackedController();
+    authenticateForSettings(controller);
+    mocks.verifyMasterPassword.mockResolvedValueOnce(false);
+
+    await expect(
+      controller.runProductivityBatch({
+        vaultId: '00000000-0000-4000-8000-000000000001',
+        entryIds: ['00000000-0000-4000-8000-000000000002'],
+        action: {
+          type: 'purge',
+          masterPassword: 'falsch',
+          confirmationCount: 1,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'AUTH_FAILED' });
+    expect(mocks.verifyMasterPassword).toHaveBeenCalledWith('falsch');
+  });
+
+  it('stellt Saved-View-Snapshots nach gleichzeitigem Sperren nicht wieder her', async () => {
+    const controller = trackedController();
+    authenticateForSettings(controller);
+    let rejectWrite: ((reason: Error) => void) | undefined;
+    mocks.setProtectedMetadata.mockImplementationOnce(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+    );
+
+    const pending = controller.saveSavedView({
+      vaultId: '00000000-0000-4000-8000-000000000001',
+      name: 'Vertrauliche Suche',
+      filters: {
+        search: 'nur-im-entsperrten-cache',
+        view: 'all',
+        types: [],
+        tags: [],
+        folderId: null,
+        security: [],
+        smartView: null,
+      },
+    });
+    await vi.waitFor(() => expect(rejectWrite).toBeTypeOf('function'));
+    await controller.lock();
+    rejectWrite?.(new Error('Schreibvorgang nach Lock abgebrochen'));
+    await expect(pending).rejects.toThrow('Schreibvorgang nach Lock abgebrochen');
+
+    const internals = controller as unknown as {
+      productivity: { snapshot(): Array<{ name: string }> };
+    };
+    expect(internals.productivity.snapshot()).toEqual([]);
   });
 
   it('verbraucht eine Ordnerautorisierung einmalig und löscht sie beim Sperren', async () => {

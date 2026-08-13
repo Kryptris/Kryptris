@@ -51,6 +51,7 @@ interface EntryDetailPanelProps {
   summary: EntrySummary | null;
   state: AppState;
   loading: boolean;
+  focusMode: boolean;
   notify: Notify;
   onEdit: () => void;
   onToggleFavorite: () => void;
@@ -66,6 +67,7 @@ export function EntryDetailPanel({
   summary,
   state,
   loading,
+  focusMode,
   notify,
   onEdit,
   onToggleFavorite,
@@ -94,6 +96,10 @@ export function EntryDetailPanel({
     setRevealPath(null);
     setPreview(null);
   }, [detail?.id]);
+
+  useEffect(() => {
+    if (focusMode) setPreview(null);
+  }, [focusMode]);
 
   useEffect(() => {
     if (Object.keys(revealed).length === 0) return;
@@ -405,7 +411,7 @@ export function EntryDetailPanel({
               </div>
             </div>
           )}
-          {detail.tags.length > 0 && (
+          {!focusMode && detail.tags.length > 0 && (
             <div className="display-field display-field--tags">
               <span className="display-field__label">Tags</span>
               <div className="tag-list">
@@ -419,7 +425,7 @@ export function EntryDetailPanel({
           )}
         </div>
 
-        {detail.note && (
+        {!focusMode && detail.note && (
           <section className="detail-note info-card">
             <header>
               <FileText />
@@ -428,6 +434,51 @@ export function EntryDetailPanel({
             <div className="markdown-content">
               <SafeMarkdown value={detail.note} />
             </div>
+          </section>
+        )}
+
+        {(detail.type === 'credential' || detail.lifecycle.expiryReminderDate !== null) && (
+          <section className="info-card">
+            <header>
+              <RefreshCw />
+              <h2>Lebenszyklus</h2>
+            </header>
+            {detail.type === 'credential' && (
+              <div className="display-field">
+                <span className="display-field__label">Rotation</span>
+                <div className="display-field__value">
+                  <span>
+                    {detail.lifecycle.rotationExcluded
+                      ? 'Bewusst ausgenommen'
+                      : detail.lifecycle.rotationIntervalDays === null
+                        ? 'Keine Erinnerung'
+                        : `Alle ${String(detail.lifecycle.rotationIntervalDays)} Tage${detail.lifecycle.nextRotationDate ? ` · nächste am ${formatDateOnly(detail.lifecycle.nextRotationDate)}` : ''}`}
+                  </span>
+                </div>
+              </div>
+            )}
+            {detail.type === 'credential' && (
+              <div className="display-field">
+                <span className="display-field__label">Lokal markierter 2FA-Status</span>
+                <div className="display-field__value">
+                  <span>
+                    {
+                      { unknown: 'Unbekannt', active: 'Aktiv', inactive: 'Nicht aktiv' }[
+                        detail.lifecycle.twoFactorStatus
+                      ]
+                    }
+                  </span>
+                </div>
+              </div>
+            )}
+            {detail.lifecycle.expiryReminderDate !== null && (
+              <div className="display-field">
+                <span className="display-field__label">Ablauf-Erinnerung</span>
+                <div className="display-field__value">
+                  <span>{formatDateOnly(detail.lifecycle.expiryReminderDate)}</span>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -499,7 +550,7 @@ export function EntryDetailPanel({
                       {formatBytes(attachment.size)} · {formatDate(attachment.createdAt)}
                     </small>
                   </div>
-                  {attachment.previewable && (
+                  {!focusMode && attachment.previewable && (
                     <IconButton
                       label={`${attachment.name} sicher ansehen`}
                       disabled={busyAttachment === attachment.id}
@@ -602,7 +653,7 @@ export function EntryDetailPanel({
         }}
       />
       <Modal
-        open={Boolean(preview)}
+        open={Boolean(preview) && !focusMode}
         title={preview?.attachment.name ?? 'Sichere Vorschau'}
         description="Die Vorschau existiert nur im entsperrten Arbeitsspeicher."
         size="large"
@@ -728,5 +779,12 @@ function SafeMarkdown({ value }: { value: string }) {
     >
       {value}
     </ReactMarkdown>
+  );
+}
+
+function formatDateOnly(value: string): string {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeZone: 'UTC' }).format(
+    new Date(Date.UTC(year ?? 0, (month ?? 1) - 1, day ?? 1)),
   );
 }

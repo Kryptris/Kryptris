@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -61,6 +61,12 @@ export interface StoredProfileHeader {
   };
 }
 
+export interface PreparedProtectedMetadataWrite {
+  readonly relativePath: typeof PROFILE_FILENAME;
+  readonly contents: Buffer;
+  readonly expectedSha256: string;
+}
+
 /** Minimal technical subset required to unlock a native backup. */
 export interface ProfileBackupAccessHeader {
   profileId: string;
@@ -85,6 +91,10 @@ export interface ProfileServiceOptions {
   recoveryKeys?: RecoveryKeyService;
   atomicWriter?: AtomicFileWriter;
   now?: () => Date;
+}
+
+export interface RecoveryRotationOptions {
+  readonly invalidateProtectedMetadataNamespaces?: readonly string[];
 }
 
 export interface BeginProfileSetupResult {
@@ -280,6 +290,8 @@ export class ProfileService {
 
   private activeProfileKey: Buffer | null = null;
   private activeMasterGateKey: Buffer | null = null;
+  /** A staged recovery verifier must never promote interrupted writes or persist a new header. */
+  private readOnly = false;
 
   public constructor(options: ProfileServiceOptions) {
     this.rootDir = path.resolve(options.rootDir);
@@ -292,7 +304,7 @@ export class ProfileService {
   }
 
   public async hasProfile(): Promise<boolean> {
-    await this.atomicWriter.recoverPreviousIfTargetMissing(this.profilePath);
+    await this.recoverPreviousIfWritable();
     try {
       await readFile(this.profilePath);
       return true;
@@ -505,8 +517,66 @@ export class ProfileService {
     this.clearPendingRecoveryRotations();
   }
 
+  /**
+   * Permanently disables persistent mutations for this service instance.
+   * It is used by the disposable restore verifier before it opens staged data.
+   */
+  public enterReadOnlyMode(): void {
+    this.readOnly = true;
+  }
+
   public isUnlocked(): boolean {
     return this.activeProfileKey !== null && this.activeMasterGateKey !== null;
+  }
+
+  /**
+   * Opens an explicitly read-only verification session from a recovery key.
+   * Recovery keys intentionally cannot authenticate the master-gate-protected
+   * public factor payload, so callers must not use this for a normal session.
+   */
+  public async unlockForReadOnlyRecoveryVerification(recoveryKey: string): Promise<void> {
+    if (!this.readOnly) {
+      throw new VaultaError(
+        'INTERNAL',
+        'Eine Recovery-Verifikationssitzung ist nur im schreibgeschuetzten Modus erlaubt.',
+      );
+    }
+    const header = await this.readPublicHeader();
+    let profileKey: Buffer | null = null;
+    try {
+      profileKey = this.unwrapProfileKeyWithRecovery(header, recoveryKey);
+      this.decryptProtectedMetadata(header, profileKey);
+      this.replaceActiveProfileKeyForReadOnlyVerification(profileKey);
+    } finally {
+      this.crypto.erase(profileKey);
+    }
+  }
+
+  /**
+   * Authenticates the configured Recovery-Key without decrypting profile metadata,
+   * vaults or factors and without changing any persistent state.
+   */
+  public async verifyRecoveryKey(
+    recoveryKey: string,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<void> {
+    assertAuthorized();
+    const header = await this.readPublicHeader();
+    assertAuthorized();
+    let recoveredProfileKey: Buffer | null = null;
+    let activeProfileKey: Buffer | null = null;
+    try {
+      recoveredProfileKey = this.unwrapProfileKeyWithRecovery(header, recoveryKey);
+      assertAuthorized();
+      activeProfileKey = this.copyActiveKey(this.activeProfileKey);
+      if (!this.crypto.equals(recoveredProfileKey, activeProfileKey)) {
+        throw new VaultaError('AUTH_FAILED', 'Der Wiederherstellungsschlüssel ist ungültig.');
+      }
+      assertAuthorized();
+    } finally {
+      this.crypto.erase(recoveredProfileKey);
+      this.crypto.erase(activeProfileKey);
+    }
   }
 
   public async withProfileKey<T>(operation: (profileKey: Buffer) => Promise<T> | T): Promise<T> {
@@ -676,7 +746,9 @@ export class ProfileService {
   public async completeRecoveryRotation(
     pendingId: string,
     confirmation: Record<string, string>,
+    options: RecoveryRotationOptions = {},
   ): Promise<void> {
+    const invalidatedNamespaces = this.validateInvalidatedNamespaces(options);
     const pending = this.pendingRecoveryRotations.get(pendingId);
     if (pending === undefined) {
       throw new VaultaError('NOT_FOUND', 'Die Wiederherstellungsrotation wurde nicht gefunden.');
@@ -691,7 +763,7 @@ export class ProfileService {
     const secret = Buffer.from(pending.secret);
     this.crypto.erase(pending.secret);
     try {
-      await this.commitRecoveryRotation(secret);
+      await this.commitRecoveryRotation(secret, invalidatedNamespaces);
     } finally {
       this.crypto.erase(secret);
     }
@@ -701,13 +773,17 @@ export class ProfileService {
    * Compatibility helper for the current one-step IPC. New callers should use
    * beginRecoveryRotation/completeRecoveryRotation so the displayed groups are confirmed first.
    */
-  public async rotateRecovery(masterPassword: string): Promise<RecoverySetup> {
+  public async rotateRecovery(
+    masterPassword: string,
+    options: RecoveryRotationOptions = {},
+  ): Promise<RecoverySetup> {
     if (!(await this.verifyMasterPassword(masterPassword)) || !this.isUnlocked()) {
       throw new VaultaError('AUTH_FAILED', 'Das Master-Passwort ist falsch.');
     }
+    const invalidatedNamespaces = this.validateInvalidatedNamespaces(options);
     const generated = this.recoveryKeys.generate();
     try {
-      await this.commitRecoveryRotation(generated.secret);
+      await this.commitRecoveryRotation(generated.secret, invalidatedNamespaces);
       return generated.setup;
     } finally {
       this.crypto.erase(generated.secret);
@@ -980,6 +1056,51 @@ export class ProfileService {
     });
   }
 
+  /** Holds the profile writer while a wider transaction prepares and installs profile.json. */
+  public async withExclusiveWrite<T>(operation: () => Promise<T>): Promise<T> {
+    return this.writes.run(operation);
+  }
+
+  /**
+   * Prepares a complete, validated profile generation without changing the live file.
+   * Callers must hold `withExclusiveWrite` until their wider transaction has committed.
+   */
+  public async prepareProtectedMetadataUpdates(
+    updates: Readonly<Record<string, unknown>>,
+  ): Promise<PreparedProtectedMetadataWrite> {
+    const namespaces = Object.keys(updates);
+    if (namespaces.length === 0) {
+      throw new VaultaError('INVALID_INPUT', 'Mindestens ein Metadatenwert ist erforderlich.');
+    }
+    namespaces.forEach((namespace) => this.validateNamespace(namespace));
+    await this.recoverPreviousIfWritable();
+    const sourceBytes = await readFile(this.profilePath);
+    const profileKey = this.copyActiveKey(this.activeProfileKey);
+    try {
+      const header = parseStoredProfileHeader(JSON.parse(sourceBytes.toString('utf8')) as unknown);
+      const metadata = this.decryptProtectedMetadata(header, profileKey);
+      for (const [namespace, value] of Object.entries(updates)) {
+        metadata[namespace] = this.normalizeProtectedValue(value);
+      }
+      header.protectedMetadata = this.encryptProtectedMetadata(
+        metadata,
+        profileKey,
+        header.profileId,
+      );
+      header.updatedAt = this.now().toISOString();
+      const contents = Buffer.from(JSON.stringify(header, null, 2), 'utf8');
+      parseStoredProfileHeader(JSON.parse(contents.toString('utf8')) as unknown);
+      return {
+        relativePath: PROFILE_FILENAME,
+        contents,
+        expectedSha256: createHash('sha256').update(sourceBytes).digest('hex'),
+      };
+    } finally {
+      this.crypto.erase(profileKey);
+      this.crypto.erase(sourceBytes);
+    }
+  }
+
   public async deleteProtectedMetadata(namespace: string): Promise<void> {
     this.validateNamespace(namespace);
     await this.writes.run(async () => {
@@ -1002,7 +1123,7 @@ export class ProfileService {
   }
 
   public async readPublicHeader(): Promise<StoredProfileHeader> {
-    await this.atomicWriter.recoverPreviousIfTargetMissing(this.profilePath);
+    await this.recoverPreviousIfWritable();
     let bytes: Buffer;
     try {
       bytes = await readFile(this.profilePath);
@@ -1297,6 +1418,12 @@ export class ProfileService {
   }
 
   private async writeHeader(header: StoredProfileHeader): Promise<void> {
+    if (this.readOnly) {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Das schreibgeschuetzte Profil darf nicht veraendert werden.',
+      );
+    }
     const bytes = Buffer.from(JSON.stringify(header, null, 2), 'utf8');
     await this.atomicWriter.writeFile(this.profilePath, bytes, async (temporaryPath) => {
       const temporary = await readFile(temporaryPath, 'utf8');
@@ -1309,6 +1436,19 @@ export class ProfileService {
     this.crypto.erase(this.activeMasterGateKey);
     this.activeProfileKey = Buffer.from(profileKey);
     this.activeMasterGateKey = Buffer.from(masterGateKey);
+  }
+
+  private replaceActiveProfileKeyForReadOnlyVerification(profileKey: Buffer): void {
+    this.crypto.erase(this.activeProfileKey);
+    this.crypto.erase(this.activeMasterGateKey);
+    this.activeProfileKey = Buffer.from(profileKey);
+    this.activeMasterGateKey = null;
+  }
+
+  private async recoverPreviousIfWritable(): Promise<void> {
+    if (!this.readOnly) {
+      await this.atomicWriter.recoverPreviousIfTargetMissing(this.profilePath);
+    }
   }
 
   private copyActiveKey(key: Buffer | null): Buffer {
@@ -1361,12 +1501,36 @@ export class ProfileService {
     this.pendingRecoveryRotations.clear();
   }
 
-  private async commitRecoveryRotation(secret: Buffer): Promise<void> {
+  private validateInvalidatedNamespaces(options: RecoveryRotationOptions): string[] {
+    const namespaces = [...(options.invalidateProtectedMetadataNamespaces ?? [])];
+    if (namespaces.length > 64) {
+      throw new VaultaError(
+        'INVALID_INPUT',
+        'Zu viele geschützte Metadatenbereiche sollen invalidiert werden.',
+      );
+    }
+    for (const namespace of namespaces) this.validateNamespace(namespace);
+    return [...new Set(namespaces)];
+  }
+
+  private async commitRecoveryRotation(
+    secret: Buffer,
+    invalidatedNamespaces: readonly string[],
+  ): Promise<void> {
     await this.writes.run(async () => {
       const header = await this.readPublicHeader();
       const profileKey = this.copyActiveKey(this.activeProfileKey);
       try {
         header.recovery = this.createRecoveryWrap(profileKey, header.profileId, secret);
+        if (invalidatedNamespaces.length > 0) {
+          const metadata = this.decryptProtectedMetadata(header, profileKey);
+          for (const namespace of invalidatedNamespaces) delete metadata[namespace];
+          header.protectedMetadata = this.encryptProtectedMetadata(
+            metadata,
+            profileKey,
+            header.profileId,
+          );
+        }
         header.updatedAt = this.now().toISOString();
         await this.writeHeader(header);
       } finally {

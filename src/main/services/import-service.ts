@@ -13,25 +13,38 @@ import type {
   TotpConfiguration,
   VaultEntry,
 } from '../../shared/models';
+import { createDefaultEntryLifecycleMetadata } from '../../shared/models';
+import { DuplicateService, type DuplicateCandidate } from './duplicate-service';
 import { emptyEntryInput } from './entry-utils';
+import { validateImportMapping } from './import-mapping-utils';
+import { summarizeImportPreview, type ImportSummary } from './import-summary';
 import { TotpService } from './totp-service';
 
 const MAX_IMPORT_BYTES = 50 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 100_000;
 const IMPORT_SESSION_TTL_MS = 15 * 60 * 1_000;
+const IMPORT_MATCHER_VAULT_ID = '00000000-0000-4000-8000-000000000008';
+const IMPORT_MATCHER_TIMESTAMP = '1970-01-01T00:00:00.000Z';
 
 type RawRecord = Record<string, unknown>;
 
+export type SupportedImportFormat = ImportFormat;
+export type ImportPreviewResult = ImportPreview;
+
+function isWelleTenVendorFormat(format: ImportFormat): boolean {
+  return format === 'dashlane-csv' || format === 'nordpass-csv' || format === 'roboform-csv';
+}
+
 interface ImportSession {
   createdAt: number;
-  format: ImportFormat;
+  format: SupportedImportFormat;
   sourceName: string;
   records: RawRecord[];
   mapping: ImportMapping;
   detectedColumns: string[];
   parserErrors: Array<{ row: number; message: string }>;
   prepared: ImportPreparedEntry[];
-  preview: ImportPreview;
+  preview: ImportPreviewResult;
 }
 
 interface PreparedResult {
@@ -39,8 +52,14 @@ interface PreparedResult {
   warnings: string[];
 }
 
+interface ImportDuplicateSource {
+  label: string;
+  imported: boolean;
+  order: number;
+}
+
 export interface ImportSource {
-  format: ImportFormat;
+  format: SupportedImportFormat;
   content: string;
   sourceName: string;
   mapping?: ImportMapping;
@@ -53,15 +72,33 @@ export interface ImportPreparedEntry {
   entry: EntryInput;
 }
 
+export interface ImportServiceDependencies {
+  duplicates: DuplicateService;
+}
+
 export class ImportService {
   private readonly sessions = new Map<string, ImportSession>();
   private readonly totpService = new TotpService();
+  private readonly duplicates: DuplicateService;
 
-  public preview(input: ImportSource): ImportPreview {
+  public constructor(dependencies: Partial<ImportServiceDependencies> = {}) {
+    this.duplicates = dependencies.duplicates ?? new DuplicateService();
+  }
+
+  public preview(input: ImportSource): ImportPreviewResult {
     this.pruneExpiredSessions();
     ensureSafeSize(input.content);
+    if (isWelleTenVendorFormat(input.format)) {
+      const detected = this.detectFormat(input.sourceName, input.content);
+      if (detected !== input.format) {
+        throw new VaultaError(
+          'UNSUPPORTED_FORMAT',
+          'Die Importdatei besitzt nicht die erwartete, dokumentierte Spaltenstruktur.',
+        );
+      }
+    }
     const parsed = parseSource(input.format, input.content);
-    const mapping = validateMapping(
+    const mapping = validateImportMapping(
       input.mapping ?? detectMapping(parsed.detectedColumns, input.format),
     );
     const token = randomUUID();
@@ -93,9 +130,9 @@ export class ImportService {
     token: string,
     mapping: ImportMapping,
     existingEntries: readonly VaultEntry[] = [],
-  ): ImportPreview {
+  ): ImportPreviewResult {
     const session = this.requireSession(token);
-    session.mapping = validateMapping(mapping);
+    session.mapping = validateImportMapping(mapping);
     this.rebuild(session, existingEntries);
     return structuredClone(session.preview);
   }
@@ -108,6 +145,16 @@ export class ImportService {
       .map((candidate) => structuredClone(candidate));
   }
 
+  /**
+   * Counts the current preview without ever returning a title, account name or
+   * imported secret. The controller can combine these counts with its atomic
+   * execution result for the final import notification.
+   */
+  public summary(token: string, selectedRows?: readonly number[]): ImportSummary {
+    const session = this.requireSession(token);
+    return summarizeImportPreview(session.preview, selectedRows);
+  }
+
   public discard(token: string): void {
     this.sessions.delete(token);
   }
@@ -116,11 +163,17 @@ export class ImportService {
     this.sessions.clear();
   }
 
-  public detectFormat(sourceName: string, content: string): ImportFormat | null {
-    const lowerName = sanitizeSourceName(sourceName).toLowerCase();
-    if (lowerName.endsWith('.json')) {
+  public detectFormat(_sourceName: string, content: string): SupportedImportFormat | null {
+    try {
+      ensureSafeSize(content);
+    } catch {
+      return null;
+    }
+    const trimmed = content.replace(/^\uFEFF/u, '').trimStart();
+    if (trimmed.length === 0) return null;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       try {
-        const root: unknown = JSON.parse(content);
+        const root: unknown = JSON.parse(trimmed);
         const record = asRecord(root);
         if (record !== null && Array.isArray(record.items) && 'encrypted' in record) {
           return 'bitwarden-json';
@@ -131,54 +184,66 @@ export class ImportService {
         return null;
       }
     }
-    if (!lowerName.endsWith('.csv')) return null;
-
-    const firstLine = content.slice(0, content.indexOf('\n') >= 0 ? content.indexOf('\n') : 2_000);
-    const normalized = firstLine.toLowerCase();
-    if (normalized.includes('grouping') && normalized.includes('fav')) return 'lastpass-csv';
-    if (normalized.includes('otp') && normalized.includes('archived')) return 'onepassword-csv';
-    if (normalized.includes('formactionorigin') || normalized.includes('httprealm')) {
-      return 'firefox-csv';
-    }
-    if (normalized.includes('group') && normalized.includes('notes')) return 'keepass-csv';
-    if (normalized.includes('url') && normalized.includes('username')) return 'chrome-csv';
-    return 'generic-csv';
+    return detectCsvFormat(content);
   }
 
   private rebuild(session: ImportSession, existingEntries: readonly VaultEntry[]): void {
     const prepared: ImportPreparedEntry[] = [];
     const candidates: ImportPreview['candidates'] = [];
     const errors = [...session.parserErrors];
-    const fingerprints = existingFingerprintMap(existingEntries);
+    const preparedRows: Array<{ result: PreparedResult; sourceIndex: number }> = [];
 
     for (let index = 0; index < session.records.length; index += 1) {
       const record = session.records[index];
       if (record === undefined) continue;
       try {
         const result = this.prepareRecord(session.format, record, session.mapping, index);
-        const { entry } = result.prepared;
-        const identity = entryIdentity(entry);
-        const duplicateOf = identity.length > 0 ? (fingerprints.get(identity) ?? null) : null;
-        if (identity.length > 0 && duplicateOf === null)
-          fingerprints.set(identity, `import:${index}`);
-        if (duplicateOf !== null) result.warnings.push('Moegliche Dublette erkannt.');
+        preparedRows.push({ result, sourceIndex: index });
+      } catch {
+        errors.push({ row: index + 1, message: 'Dieser Datensatz konnte nicht gelesen werden.' });
+      }
+    }
+
+    this.duplicates.withMatcher((matcher) => {
+      const knownReferences = new Map<string, ImportDuplicateSource>();
+      for (let index = 0; index < existingEntries.length; index += 1) {
+        const entry = existingEntries[index]!;
+        matcher.add(entry);
+        if (entry.deletedAt === null) {
+          knownReferences.set(duplicateReferenceKey(entry.vaultId, entry.id), {
+            label: entry.id,
+            imported: false,
+            order: index,
+          });
+        }
+      }
+
+      for (const row of preparedRows) {
+        const { entry } = row.result.prepared;
+        const matcherEntry = importMatcherEntry(entry, row.sourceIndex);
+        const matches = matcher.add(matcherEntry);
+        const duplicateOf = selectDuplicateSource(matches, matcherEntry, knownReferences);
+        if (duplicateOf !== null) row.result.warnings.push('Moegliche Dublette erkannt.');
 
         const credential = entry.data.type === 'credential' ? entry.data.value : null;
         candidates.push({
-          sourceIndex: index,
+          sourceIndex: row.sourceIndex,
           title: entry.title,
           username: credential?.username ?? '',
           website: credential?.websites[0] ?? '',
           type: entry.data.type,
           duplicateOf,
-          warnings: [...new Set(result.warnings)],
+          warnings: [...new Set(row.result.warnings)],
           selected: duplicateOf === null,
         });
-        prepared.push(result.prepared);
-      } catch {
-        errors.push({ row: index + 1, message: 'Dieser Datensatz konnte nicht gelesen werden.' });
+        prepared.push(row.result.prepared);
+        knownReferences.set(duplicateReferenceKey(matcherEntry.vaultId, matcherEntry.id), {
+          label: `import:${row.sourceIndex}`,
+          imported: true,
+          order: row.sourceIndex,
+        });
       }
-    }
+    });
 
     session.prepared = prepared;
     session.preview = {
@@ -193,7 +258,7 @@ export class ImportService {
   }
 
   private prepareRecord(
-    format: ImportFormat,
+    format: SupportedImportFormat,
     record: RawRecord,
     mapping: ImportMapping,
     sourceIndex: number,
@@ -207,7 +272,7 @@ export class ImportService {
     record: RawRecord,
     mapping: ImportMapping,
     sourceIndex: number,
-    format: ImportFormat,
+    format: SupportedImportFormat,
   ): PreparedResult {
     const rawTitle = readColumn(record, mapping.title);
     const title = rawTitle.trim() || `Importierter Eintrag ${sourceIndex + 1}`;
@@ -230,7 +295,13 @@ export class ImportService {
     entry.favorite = parseBoolean(readFirst(record, ['favorite', 'favourite', 'fav']));
 
     const warnings = basicWarnings(rawTitle, username, password, website);
-    const totpValue = readFirst(record, ['otpauth', 'otpAuth', 'totp', 'one-time password']);
+    const totpValue = readFirst(record, [
+      'otpauth',
+      'otpAuth',
+      'otpSecret',
+      'totp',
+      'one-time password',
+    ]);
     if (totpValue.length > 0) {
       const totp = this.parseTotp(totpValue, title, username);
       if (totp === null) warnings.push('Der TOTP-Wert war ungueltig und wurde ausgelassen.');
@@ -399,7 +470,7 @@ export class ImportService {
 }
 
 function parseSource(
-  format: ImportFormat,
+  format: SupportedImportFormat,
   content: string,
 ): {
   records: RawRecord[];
@@ -408,6 +479,87 @@ function parseSource(
 } {
   if (format.endsWith('-csv')) return parseCsv(content);
   return parseJson(format, content);
+}
+
+/**
+ * Format selection is deliberately based on complete, documented header
+ * signatures. The filename is untrusted presentation data and is never used to
+ * choose a parser.
+ */
+function detectCsvFormat(content: string): SupportedImportFormat | null {
+  try {
+    const parsed = Papa.parse<Record<string, string>>(content.replace(/^\uFEFF/u, ''), {
+      header: true,
+      preview: 1,
+      skipEmptyLines: 'greedy',
+      transformHeader: (header) => header.trim(),
+    });
+    const headers = parsed.meta.fields?.filter((field) => field.length > 0) ?? [];
+    if (headers.length < 2) return null;
+    const normalized = new Set(headers.map(normalizeName));
+
+    if (
+      hasHeaders(normalized, 'username', 'title', 'password', 'url', 'otpsecret') &&
+      hasAnyHeader(normalized, 'note', 'category')
+    ) {
+      return 'dashlane-csv';
+    }
+    if (
+      hasHeaders(
+        normalized,
+        'name',
+        'url',
+        'username',
+        'password',
+        'note',
+        'cardholdername',
+        'cardnumber',
+        'cvc',
+        'expirydate',
+        'zipcode',
+        'folder',
+        'fullname',
+        'phonenumber',
+        'email',
+        'address1',
+        'address2',
+        'city',
+        'country',
+        'state',
+        'totp',
+        'sharedfolder',
+      )
+    ) {
+      return 'nordpass-csv';
+    }
+    if (hasHeaders(normalized, 'name', 'url', 'login', 'pwd', 'rffields')) {
+      return 'roboform-csv';
+    }
+    if (hasHeaders(normalized, 'url', 'username', 'password', 'name', 'grouping', 'fav')) {
+      return 'lastpass-csv';
+    }
+    if (hasHeaders(normalized, 'title', 'url', 'username', 'password', 'otpauth', 'archived')) {
+      return 'onepassword-csv';
+    }
+    if (hasHeaders(normalized, 'url', 'username', 'password', 'formactionorigin', 'httprealm')) {
+      return 'firefox-csv';
+    }
+    if (hasHeaders(normalized, 'group', 'title', 'username', 'password', 'url', 'notes')) {
+      return 'keepass-csv';
+    }
+    if (hasHeaders(normalized, 'name', 'url', 'username', 'password')) return 'chrome-csv';
+    return 'generic-csv';
+  } catch {
+    return null;
+  }
+}
+
+function hasHeaders(headers: ReadonlySet<string>, ...expected: readonly string[]): boolean {
+  return expected.every((header) => headers.has(normalizeName(header)));
+}
+
+function hasAnyHeader(headers: ReadonlySet<string>, ...expected: readonly string[]): boolean {
+  return expected.some((header) => headers.has(normalizeName(header)));
 }
 
 function parseCsv(content: string): {
@@ -434,7 +586,7 @@ function parseCsv(content: string): {
 }
 
 function parseJson(
-  format: ImportFormat,
+  format: SupportedImportFormat,
   content: string,
 ): {
   records: RawRecord[];
@@ -532,7 +684,7 @@ function genericJsonRecords(root: unknown): RawRecord[] {
   });
 }
 
-function detectMapping(columns: readonly string[], format: ImportFormat): ImportMapping {
+function detectMapping(columns: readonly string[], format: SupportedImportFormat): ImportMapping {
   const column = (...names: string[]): string => {
     for (const name of names) {
       const found = columns.find((candidate) => normalizeName(candidate) === normalizeName(name));
@@ -553,22 +705,13 @@ function detectMapping(columns: readonly string[], format: ImportFormat): Import
   }
   return {
     title: column('title', 'name', 'hostname'),
-    username: column('username', 'user name', 'login_username', 'email'),
-    password: column('password', 'login_password'),
+    username: column('username', 'user name', 'login_username', 'login', 'email'),
+    password: column('password', 'login_password', 'pwd'),
     url: column('url', 'website', 'login_uri', 'hostname', 'origin'),
     note: column('note', 'notes', 'extra', 'comments'),
-    folder: column('folder', 'group', 'grouping', 'vault'),
+    folder: column('folder', 'group', 'grouping', 'vault', 'category'),
     tags: column('tags', 'tag'),
   };
-}
-
-function validateMapping(mapping: ImportMapping): ImportMapping {
-  for (const key of Object.keys(mapping) as Array<keyof ImportMapping>) {
-    const value: string = mapping[key];
-    if (value.length > 200 || /[\r\n\0]/u.test(value))
-      throw invalid('Die Importzuordnung ist ungueltig.');
-  }
-  return { ...mapping };
 }
 
 function basicWarnings(
@@ -585,22 +728,46 @@ function basicWarnings(
   return warnings;
 }
 
-function existingFingerprintMap(entries: readonly VaultEntry[]): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const entry of entries) {
-    if (entry.deletedAt !== null) continue;
-    const identity = entryIdentity(entry);
-    if (identity.length > 0) map.set(identity, entry.id);
-  }
-  return map;
+function importMatcherEntry(entry: EntryInput, sourceIndex: number): VaultEntry {
+  return {
+    ...structuredClone(entry),
+    id: `import:${sourceIndex}`,
+    vaultId: IMPORT_MATCHER_VAULT_ID,
+    attachments: [],
+    lifecycle: structuredClone(entry.lifecycle ?? createDefaultEntryLifecycleMetadata()),
+    createdAt: IMPORT_MATCHER_TIMESTAMP,
+    updatedAt: IMPORT_MATCHER_TIMESTAMP,
+    secretChangedAt: IMPORT_MATCHER_TIMESTAMP,
+    lastUsedAt: null,
+    deletedAt: null,
+  };
 }
 
-function entryIdentity(entry: EntryInput | VaultEntry): string {
-  if (entry.data.type !== 'credential')
-    return `${entry.data.type}\0${entry.title.trim().toLowerCase()}`;
-  return [entry.title, entry.data.value.username, entry.data.value.websites[0] ?? '']
-    .map((value) => value.trim().toLocaleLowerCase('de'))
-    .join('\0');
+function selectDuplicateSource(
+  matches: readonly DuplicateCandidate[],
+  importedEntry: VaultEntry,
+  knownReferences: ReadonlyMap<string, ImportDuplicateSource>,
+): string | null {
+  const importedReference = duplicateReferenceKey(importedEntry.vaultId, importedEntry.id);
+  const sources = matches.flatMap((candidate) =>
+    [candidate.left, candidate.right].flatMap((reference) => {
+      const key = duplicateReferenceKey(reference.vaultId, reference.entryId);
+      if (key === importedReference) return [];
+      const source = knownReferences.get(key);
+      return source === undefined ? [] : [source];
+    }),
+  );
+  sources.sort(
+    (left, right) =>
+      Number(left.imported) - Number(right.imported) ||
+      left.order - right.order ||
+      left.label.localeCompare(right.label, 'en'),
+  );
+  return sources[0]?.label ?? null;
+}
+
+function duplicateReferenceKey(vaultId: string, entryId: string): string {
+  return JSON.stringify([vaultId, entryId]);
 }
 
 function bitwardenCustomFields(value: unknown): CustomField[] {

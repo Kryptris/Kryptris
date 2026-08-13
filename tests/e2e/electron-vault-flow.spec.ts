@@ -75,6 +75,8 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
       'events',
       'factors',
       'generator',
+      'productivity',
+      'quality',
       'reports',
       'security',
       'settings',
@@ -110,6 +112,10 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await page.getByRole('checkbox', { name: /Wiederherstellungsschlüssel erzeugen/u }).uncheck();
     await page.getByRole('button', { name: 'Profil sicher einrichten' }).click();
 
+    const onboarding = page.getByRole('dialog', { name: 'Willkommen bei Kryptris' });
+    await expect(onboarding).toBeVisible({ timeout: 45_000 });
+    await onboarding.getByRole('button', { name: 'Einführung überspringen' }).click();
+    await expect(onboarding).toHaveCount(0);
     await expect(page.getByPlaceholder('Tresor durchsuchen')).toBeVisible({ timeout: 45_000 });
     await page.getByLabel('Eintragsliste').getByRole('button', { name: 'Neuer Eintrag' }).click();
     const newEntryDialog = page.getByRole('dialog', { name: 'Neuen Eintrag anlegen' });
@@ -227,6 +233,22 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
 
     await expect(page.getByPlaceholder('Tresor durchsuchen')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
+
+    await openSidebarNavigation(page);
+    await page.getByRole('button', { name: 'Sicherheitszentrale', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Sicherheitszentrale' })).toBeVisible();
+    await expect(page.getByLabel(/Lokaler Vorsorgewert \d+ von 100/u)).toBeVisible({
+      timeout: 30_000,
+    });
+    const integrityCard = page
+      .locator('.security-center__detail-card')
+      .filter({ hasText: 'Technische Integritätsprüfung' });
+    await integrityCard.getByRole('button', { name: 'Integrität prüfen', exact: true }).click();
+    await expect(integrityCard.getByText('Ohne Befund abgeschlossen', { exact: true })).toBeVisible(
+      {
+        timeout: 30_000,
+      },
+    );
 
     await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Import', exact: true }).click();

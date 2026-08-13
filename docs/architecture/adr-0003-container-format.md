@@ -2,13 +2,22 @@
 
 - Status: angenommen
 - Datum: 14. Juli 2026
-- Bezug: Welle 0–3
+- Bezug: Welle 0–3, 8 und 12
 
 ## Tresorcontainer
 
 Ein `.vaulta`-Container besteht aus einem minimalen technischen Header und einem AES-256-GCM-Payload. Der Header enthält Magic, Formatversion, Container-/Tresor-ID, HKDF-Salt, Generation, Algorithmus, Nonce und Auth-Tag. Tresorname, Typen, Titel, Tags, Ordner und Einträge stehen ausschließlich im verschlüsselten Payload. Der kanonisch serialisierte Header ohne Tag ist AAD.
 
 Unbekannte Versionen oder Algorithmen werden abgelehnt. Vor einer Migration entsteht ein authentifiziertes Backup. Migrationen sind nur vorwärtsgerichtet.
+
+Der äußere `.vaulta`-Container bleibt in Version 1. Die entschlüsselte, im Container liegende
+`VaultDocument`-Payload ist dagegen seit Welle 8 in Version 2: Sie bündelt ausschließlich die
+Lebenszyklusmetadaten eines Eintrags in einem `lifecycle`-Objekt. Der registrierte Main-Prozess-
+Schritt 1 → 2 validiert zuerst mit dem V2-Parser, erstellt über die vorhandene
+Snapshot-/Rollback-Infrastruktur einen Vorab-Snapshot und ersetzt alle betroffenen Tresore erst
+anschließend atomar. Bereits aktuelle V2-Payloads werden nicht geschrieben; eine Version 3 oder höher
+wird vor Snapshot und Write abgelehnt. Der Controller-Integrationstest deckt mehrere Tresore, einen
+Anhang, einen TOTP-Faktor, unterbrochenen Commit und Klartext-Canaries in Journal/Sidecars ab.
 
 ## Anhänge
 

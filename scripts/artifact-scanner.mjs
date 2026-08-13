@@ -27,6 +27,55 @@ const DEFAULT_LIMITS = Object.freeze({
 
 const ZIP_EXTENSIONS = new Set(['.jar', '.nupkg', '.zip']);
 
+/**
+ * The release scan normally sees application files only.  It is deliberately
+ * also safe to point it at a reproducible data-root fixture: that lets the
+ * release gate reject a leaked runtime artifact instead of merely looking for
+ * a handful of known canary values.
+ *
+ * These names are the persistent boundaries introduced by waves 7–10.  W11
+ * keeps reports and reminders in memory, so it deliberately adds no path to
+ * this list.  If a future writer adds a persistent cache, the scan fails
+ * closed rather than silently accepting an unencrypted cache directory.
+ */
+const ENCRYPTED_ATTACHMENT_STAGING_DIRECTORIES = new Set([
+  '.vaulta-entry-transaction-staging',
+  '.vaulta-duplicate-merge-staging',
+  '.vault-package-import-staging',
+]);
+const TECHNICAL_TRANSACTION_DIRECTORIES = new Set([
+  '.vaulta-multi-file-transaction',
+  '.vaulta-migration-transaction',
+]);
+const ATTACHMENT_MAGIC = Buffer.from('VLTATT01', 'ascii');
+const BACKUP_MAGIC = Buffer.from('VLTBKP01', 'ascii');
+const VAULT_PACKAGE_MAGIC = Buffer.from('KRYVLT01', 'ascii');
+const OFFLINE_BREACH_INDEX_MAGIC = Buffer.from('KRYBRCH1', 'ascii');
+const ATTACHMENT_HEADER_LIMIT = 64 * 1024;
+const BACKUP_HEADER_LIMIT = 2 * 1024 * 1024;
+const RUNTIME_POLICY_PREFIX_BYTES = BACKUP_HEADER_LIMIT + 12;
+const RUNTIME_POLICY_TAIL_BYTES = 256;
+const UUID_V4 = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+const BREACH_IMPORT_STAGING_FILE = new RegExp(`^\\.breach-import-${UUID_V4}\\.tmp$`, 'iu');
+const VAULTA_ATOMIC_TEMPORARY = new RegExp(`^\\..+\\.vaulta-tmp-${UUID_V4}$`, 'iu');
+const ROLLBACK_FILE = /^rollback-[0-9]{6}\.bin$/u;
+const MULTI_FILE_TECHNICAL_TEMPORARY = new RegExp(
+  `^\\.(?:journal|terminal)\\.json\\.tmp-${UUID_V4}$`,
+  'iu',
+);
+const MIGRATION_TECHNICAL_TEMPORARY = new RegExp(
+  `^\\.(?:journal|terminal)-${UUID_V4}\\.tmp$`,
+  'iu',
+);
+
+/*
+ * These names are not valid technical transaction fields.  They are checked
+ * only under transient data roots, never across application code, so a source
+ * bundle cannot turn ordinary identifiers into a false positive.
+ */
+const CLEAR_TEXT_SECRET_FIELD =
+  /"(?:password|masterPassword|exportPassword|secret|totp(?:Seed)?|private(?:Key|_key)?|recovery(?:Key|_key)?|note|customFields|username|title|websites|appNames|contents|plaintext|cleartext|value|data)"\s*:/iu;
+
 class ArtifactScanError extends Error {
   constructor(message) {
     super(message);
@@ -64,6 +113,311 @@ function extensionFor(value) {
 function isNestedArchive(value) {
   const extension = extensionFor(value);
   return extension === '.asar' || ZIP_EXTENSIONS.has(extension);
+}
+
+function virtualPathParts(value) {
+  return value
+    .replaceAll('\\', '/')
+    .replaceAll('!/', '/')
+    .split('/')
+    .filter((part) => part.length > 0);
+}
+
+function isPersistentCacheDirectory(value) {
+  return /^\.vaulta-(?:(?:[a-z0-9]+-)*(?:cache|reports?))$/iu.test(value);
+}
+
+function isDryRunDirectory(value) {
+  return value.startsWith('kryptris-restore-dry-run-');
+}
+
+function isRestoreTransactionDirectory(value) {
+  return /^\..+\.vaulta-restore-(?:stage|rollback|discard)$/iu.test(value);
+}
+
+function runtimePathContext(virtualPath) {
+  const parts = virtualPathParts(virtualPath);
+  const cacheDirectory = parts.find(isPersistentCacheDirectory);
+  if (cacheDirectory !== undefined) return { kind: 'forbidden-cache', cacheDirectory };
+
+  const dryRunDirectory = parts.find(isDryRunDirectory);
+  if (dryRunDirectory !== undefined) return { kind: 'forbidden-dry-run', dryRunDirectory };
+
+  const breachImportStaging = parts.find((part) => BREACH_IMPORT_STAGING_FILE.test(part));
+  if (breachImportStaging !== undefined) {
+    return { kind: 'forbidden-breach-import-staging', breachImportStaging };
+  }
+
+  const stagingIndex = parts.findIndex((part) =>
+    ENCRYPTED_ATTACHMENT_STAGING_DIRECTORIES.has(part),
+  );
+  if (stagingIndex >= 0) {
+    return {
+      kind: 'attachment-staging',
+      remaining: parts.slice(stagingIndex + 1),
+      stagingDirectory: parts[stagingIndex],
+    };
+  }
+
+  const technicalIndex = parts.findIndex((part) => TECHNICAL_TRANSACTION_DIRECTORIES.has(part));
+  if (technicalIndex >= 0) {
+    return {
+      kind: 'technical-transaction',
+      remaining: parts.slice(technicalIndex + 1),
+      transactionDirectory: parts[technicalIndex],
+    };
+  }
+
+  const restoreIndex = parts.findIndex(isRestoreTransactionDirectory);
+  if (restoreIndex >= 0) {
+    return {
+      kind: 'restore-tree',
+      remaining: parts.slice(restoreIndex + 1),
+      restoreDirectory: parts[restoreIndex],
+    };
+  }
+
+  const baseName = parts.at(-1) ?? '';
+  if (VAULTA_ATOMIC_TEMPORARY.test(baseName)) return { kind: 'atomic-temporary' };
+  if (baseName.endsWith('.vaulta-backup')) return { kind: 'backup' };
+  if (baseName.endsWith('.kryptris-vault')) return { kind: 'vault-package' };
+  if (baseName.endsWith('.kbi')) return { kind: 'offline-breach-index' };
+  if (baseName.endsWith('.vaulta')) return { kind: 'vault-container' };
+  if (baseName.endsWith('.vatt')) return { kind: 'attachment' };
+  return { kind: 'none' };
+}
+
+function assertRuntimePathAllowed(virtualPath) {
+  const context = runtimePathContext(virtualPath);
+  if (context.kind === 'forbidden-cache') {
+    throw new ArtifactScanError(
+      `Unverschlüsselter Cache- oder Berichtspfad im Artefakt ist unzulässig: ${virtualPath}`,
+    );
+  }
+  if (context.kind === 'forbidden-dry-run') {
+    throw new ArtifactScanError(
+      `Entschlüsseltes Restore-Probelauf-Staging darf nicht als Artefakt verbleiben: ${virtualPath}`,
+    );
+  }
+  if (context.kind === 'forbidden-breach-import-staging') {
+    throw new ArtifactScanError(
+      `Unbereinigtes Datenlecklisten-Staging darf nicht als Artefakt verbleiben: ${virtualPath}`,
+    );
+  }
+  if (context.kind === 'technical-transaction' && context.remaining.length > 1) {
+    throw new ArtifactScanError(
+      `Technisches Transaktionsverzeichnis enthält einen unerwarteten Pfad: ${virtualPath}`,
+    );
+  }
+}
+
+function startsWith(buffer, prefix) {
+  return buffer.length >= prefix.length && buffer.subarray(0, prefix.length).equals(prefix);
+}
+
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isEnvelope(value) {
+  return (
+    isRecord(value) &&
+    value.algorithm === 'AES-256-GCM' &&
+    typeof value.nonce === 'string' &&
+    typeof value.ciphertext === 'string' &&
+    typeof value.tag === 'string'
+  );
+}
+
+function parseLengthPrefixedHeader(buffer, magic, maximumLength) {
+  if (!startsWith(buffer, magic) || buffer.length < magic.length + 4) return null;
+  const headerLength = buffer.readUInt32BE(magic.length);
+  const start = magic.length + 4;
+  const end = start + headerLength;
+  if (headerLength === 0 || headerLength > maximumLength || end > buffer.length) return null;
+  try {
+    const parsed = JSON.parse(buffer.subarray(start, end).toString('utf8'));
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeEncryptedAttachment(buffer) {
+  const header = parseLengthPrefixedHeader(buffer, ATTACHMENT_MAGIC, ATTACHMENT_HEADER_LIMIT);
+  return (
+    header !== null &&
+    header.format === 'vaulta-attachment' &&
+    header.version === 1 &&
+    header.cipher === 'AES-256-GCM-CHUNKED' &&
+    typeof header.chunkSize === 'number' &&
+    typeof header.noncePrefix === 'string' &&
+    isEnvelope(header.wrappedFileKey)
+  );
+}
+
+function looksLikeEncryptedBackup(buffer) {
+  const header = parseLengthPrefixedHeader(buffer, BACKUP_MAGIC, BACKUP_HEADER_LIMIT);
+  return (
+    header !== null &&
+    header.format === 'vaulta-backup' &&
+    header.version === 1 &&
+    header.cipher === 'AES-256-GCM-CHUNKED' &&
+    isRecord(header.keyWraps) &&
+    isEnvelope(header.keyWraps.master)
+  );
+}
+
+function looksLikeEncryptedVaultPackage(buffer) {
+  const header = parseLengthPrefixedHeader(buffer, VAULT_PACKAGE_MAGIC, ATTACHMENT_HEADER_LIMIT);
+  return (
+    header !== null &&
+    header.format === 'kryptris-vault-package' &&
+    header.version === 1 &&
+    header.cipher === 'AES-256-GCM-CHUNKED' &&
+    isEnvelope(header.wrappedPackageKey)
+  );
+}
+
+function looksLikeEncryptedContainer(buffer) {
+  const text = buffer.toString('utf8');
+  return (
+    /"magic"\s*:\s*"VAULTA-CONTAINER"/u.test(text) &&
+    /"cipher"\s*:\s*"AES-256-GCM"/u.test(text) &&
+    /"payload"\s*:\s*\{/u.test(text) &&
+    /"ciphertext"\s*:/u.test(text)
+  );
+}
+
+function looksLikeEncryptedProfile(buffer) {
+  const text = buffer.toString('utf8');
+  return (
+    /"format"\s*:\s*"vaulta-profile"/u.test(text) &&
+    /"protectedMetadata"\s*:\s*\{/u.test(text) &&
+    /"passwordVerifier"\s*:\s*\{/u.test(text) &&
+    /"ciphertext"\s*:/u.test(text)
+  );
+}
+
+function looksLikeOfflineBreachIndex(buffer) {
+  // W9 stores a public SHA-1 threat corpus, not vault material.  It may appear
+  // byte-for-byte in a rollback sidecar, so accepting it requires this exact
+  // fixed binary header rather than treating arbitrary cleartext as safe.
+  return (
+    startsWith(buffer, OFFLINE_BREACH_INDEX_MAGIC) &&
+    buffer.length >= 64 &&
+    buffer.readUInt16LE(8) === 1 &&
+    buffer.readUInt8(10) === 1 &&
+    buffer.readUInt8(11) === 24 &&
+    buffer.readUInt32LE(20) === 65_537
+  );
+}
+
+function looksLikeProtectedRuntimeArtifact(buffer) {
+  return (
+    looksLikeEncryptedAttachment(buffer) ||
+    looksLikeEncryptedBackup(buffer) ||
+    looksLikeEncryptedVaultPackage(buffer) ||
+    looksLikeEncryptedContainer(buffer) ||
+    looksLikeEncryptedProfile(buffer)
+  );
+}
+
+function looksLikeAllowedRollbackArtifact(buffer) {
+  return looksLikeProtectedRuntimeArtifact(buffer) || looksLikeOfflineBreachIndex(buffer);
+}
+
+function assertNoCleartextSecretField(buffer, virtualPath) {
+  if (CLEAR_TEXT_SECRET_FIELD.test(buffer.toString('utf8'))) {
+    throw new ArtifactScanError(
+      `Klartext-Geheimnisfeld in einem geschützten Laufzeitartefakt: ${virtualPath}`,
+    );
+  }
+}
+
+function technicalFileKind(context) {
+  if (context.remaining.length !== 1) return 'invalid';
+  const [name] = context.remaining;
+  if (ROLLBACK_FILE.test(name)) return 'rollback';
+  if (name === 'journal.json' || name === 'terminal.json') return 'record';
+  if (
+    (context.transactionDirectory === '.vaulta-multi-file-transaction' &&
+      MULTI_FILE_TECHNICAL_TEMPORARY.test(name)) ||
+    (context.transactionDirectory === '.vaulta-migration-transaction' &&
+      MIGRATION_TECHNICAL_TEMPORARY.test(name))
+  ) {
+    return 'record';
+  }
+  return 'invalid';
+}
+
+function inspectRuntimeArtifactContents(virtualPath, buffer) {
+  const context = runtimePathContext(virtualPath);
+  if (context.kind === 'none') return;
+  assertNoCleartextSecretField(buffer, virtualPath);
+
+  if (context.kind === 'attachment-staging') {
+    const baseName = context.remaining.at(-1) ?? '';
+    if (!baseName.endsWith('.vatt') || !looksLikeEncryptedAttachment(buffer)) {
+      throw new ArtifactScanError(
+        `Verschlüsseltes Anhangs-Staging enthält keine zulässige Anhangsdatei: ${virtualPath}`,
+      );
+    }
+    return;
+  }
+
+  if (context.kind === 'technical-transaction') {
+    const kind = technicalFileKind(context);
+    if (kind === 'invalid') {
+      throw new ArtifactScanError(
+        `Technisches Transaktionsverzeichnis enthält eine unbekannte Datei: ${virtualPath}`,
+      );
+    }
+    if (kind === 'rollback' && !looksLikeAllowedRollbackArtifact(buffer)) {
+      throw new ArtifactScanError(
+        `Technisches Rollback-Sidecar ist weder verschlüsselt noch ein gültiger Offline-Hashindex: ${virtualPath}`,
+      );
+    }
+    return;
+  }
+
+  if (context.kind === 'restore-tree') {
+    const baseName = context.remaining.at(-1) ?? '';
+    if (baseName === '.vaulta-restore-committed') return;
+    if (!looksLikeProtectedRuntimeArtifact(buffer)) {
+      throw new ArtifactScanError(
+        `Restore-Staging enthält keine verschlüsselte Datei: ${virtualPath}`,
+      );
+    }
+    return;
+  }
+
+  if (context.kind === 'attachment' && !looksLikeEncryptedAttachment(buffer)) {
+    throw new ArtifactScanError(`Anhangsartefakt ist nicht verschlüsselt: ${virtualPath}`);
+  }
+  if (context.kind === 'backup' && !looksLikeEncryptedBackup(buffer)) {
+    throw new ArtifactScanError(`Backup-Artefakt ist nicht verschlüsselt: ${virtualPath}`);
+  }
+  if (context.kind === 'vault-package' && !looksLikeEncryptedVaultPackage(buffer)) {
+    throw new ArtifactScanError(`Tresor-Paket ist nicht verschlüsselt: ${virtualPath}`);
+  }
+  if (context.kind === 'offline-breach-index' && !looksLikeOfflineBreachIndex(buffer)) {
+    throw new ArtifactScanError(`Offline-Datenleckindex ist ungültig: ${virtualPath}`);
+  }
+  if (context.kind === 'vault-container' && !looksLikeEncryptedContainer(buffer)) {
+    throw new ArtifactScanError(`Tresorartefakt ist nicht verschlüsselt: ${virtualPath}`);
+  }
+  if (context.kind === 'atomic-temporary' && !looksLikeProtectedRuntimeArtifact(buffer)) {
+    throw new ArtifactScanError(
+      `Atomäres temporäres Artefakt enthält keinen verschlüsselten Zustand: ${virtualPath}`,
+    );
+  }
+}
+
+function scanRuntimePolicyChunk(virtualPath, buffer) {
+  if (runtimePathContext(virtualPath).kind !== 'none') {
+    assertNoCleartextSecretField(buffer, virtualPath);
+  }
 }
 
 function normalizeArchivePath(value) {
@@ -110,6 +464,7 @@ function addFinding(state, virtualPath, kind) {
 }
 
 function scanVirtualPath(state, virtualPath) {
+  assertRuntimePathAllowed(virtualPath);
   for (const value of state.forbiddenTexts) {
     if (virtualPath.includes(value)) addFinding(state, virtualPath, 'Pfad');
   }
@@ -141,14 +496,29 @@ function scanBufferContents(state, buffer, virtualPath, countBytes = true) {
 
 async function scanReadable(state, readable, virtualPath, collect) {
   const chunks = collect ? [] : null;
+  const runtimePolicyApplies = runtimePathContext(virtualPath).kind !== 'none';
+  const inspectionChunks = runtimePolicyApplies ? [] : null;
   let collectedBytes = 0;
+  let inspectionBytes = 0;
   let tail = Buffer.alloc(0);
   for await (const rawChunk of readable) {
     const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
     consumeBytes(state, chunk.length, virtualPath);
     const searchable = tail.length === 0 ? chunk : Buffer.concat([tail, chunk]);
     scanBufferContents(state, searchable, virtualPath, false);
-    tail = searchable.subarray(Math.max(0, searchable.length - state.maxPatternBytes + 1));
+    if (runtimePolicyApplies) scanRuntimePolicyChunk(virtualPath, searchable);
+    tail = searchable.subarray(
+      Math.max(
+        0,
+        searchable.length - Math.max(state.maxPatternBytes - 1, RUNTIME_POLICY_TAIL_BYTES),
+      ),
+    );
+    if (inspectionChunks !== null && inspectionBytes < RUNTIME_POLICY_PREFIX_BYTES) {
+      const remaining = RUNTIME_POLICY_PREFIX_BYTES - inspectionBytes;
+      const prefix = chunk.subarray(0, remaining);
+      inspectionChunks.push(Buffer.from(prefix));
+      inspectionBytes += prefix.length;
+    }
     if (chunks !== null) {
       collectedBytes += chunk.length;
       if (collectedBytes > state.limits.maxNestedArchiveBytes) {
@@ -156,6 +526,9 @@ async function scanReadable(state, readable, virtualPath, collect) {
       }
       chunks.push(Buffer.from(chunk));
     }
+  }
+  if (inspectionChunks !== null) {
+    inspectRuntimeArtifactContents(virtualPath, Buffer.concat(inspectionChunks, inspectionBytes));
   }
   return chunks === null ? null : Buffer.concat(chunks, collectedBytes);
 }
@@ -399,6 +772,7 @@ async function scanAsarBuffer(state, buffer, virtualPath, depth) {
       registerFile(state, entryPath);
       const contents = buffer.subarray(start, end);
       scanBufferContents(state, contents, entryPath);
+      inspectRuntimeArtifactContents(entryPath, contents);
       if (isNestedArchive(normalized)) {
         if (contents.length > state.limits.maxNestedArchiveBytes) {
           throw new ArtifactScanError(`Verschachteltes Archiv ist zu groß: ${entryPath}`);
@@ -456,6 +830,7 @@ async function scanRegularFile(state, filePath, virtualPath, size, depth) {
     }
     const contents = await readFile(filePath);
     scanBufferContents(state, contents, virtualPath);
+    inspectRuntimeArtifactContents(virtualPath, contents);
     await scanAsarBuffer(state, contents, virtualPath, depth + 1);
     return;
   }

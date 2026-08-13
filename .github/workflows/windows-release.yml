@@ -69,7 +69,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $installer = (Resolve-Path "release/Kryptris-$version-Setup.exe").Path
+          $installer = (Resolve-Path "release/Kryptris-$version-x64-Setup.exe").Path
           $installRoot = Join-Path $env:RUNNER_TEMP 'vaulta-nsis'
           $installDir = Join-Path $installRoot 'Kryptris'
           $appData = Join-Path $env:RUNNER_TEMP 'vaulta-nsis-appdata'
@@ -134,7 +134,8 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $expected = @(
-            "Kryptris-$version-Setup.exe",
+            "Kryptris-$version-x64-Setup.exe",
+            "Kryptris-$version-arm64-Setup.exe",
             "Kryptris-$version-x64.zip",
             "Kryptris-$version-arm64.zip"
           )
@@ -175,11 +176,11 @@ jobs:
           tag="${{ needs.build.outputs.release_tag }}"
           version="${tag#v}"
           cd release
-          expected=("Kryptris-$version-Setup.exe" "Kryptris-$version-x64.zip" "Kryptris-$version-arm64.zip" "SHA256SUMS.txt")
+          expected=("Kryptris-$version-x64-Setup.exe" "Kryptris-$version-arm64-Setup.exe" "Kryptris-$version-x64.zip" "Kryptris-$version-arm64.zip" "SHA256SUMS.txt")
           for artifact in "${expected[@]}"; do
             test -f "$artifact" || { echo "Fehlendes Release-Artefakt: $artifact" >&2; exit 1; }
           done
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 5
           sha256sum --check SHA256SUMS.txt
       - name: GitHub Release veröffentlichen
         shell: bash
@@ -191,7 +192,8 @@ jobs:
           tag="${{ needs.build.outputs.release_tag }}"
           version="${tag#v}"
           gh release create "$tag" \
-            "release/Kryptris-$version-Setup.exe" \
+            "release/Kryptris-$version-x64-Setup.exe" \
+            "release/Kryptris-$version-arm64-Setup.exe" \
             "release/Kryptris-$version-x64.zip" \
             "release/Kryptris-$version-arm64.zip" \
             release/SHA256SUMS.txt \

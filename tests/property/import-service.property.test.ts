@@ -3,8 +3,9 @@ import Papa from 'papaparse';
 import { describe, expect, it } from 'vitest';
 
 import { ImportService } from '../../src/main/services/import-service';
-import type { ImportFormat } from '../../src/shared/models';
 import { entryInputSchema } from '../../src/shared/schemas';
+
+type SupportedFixtureFormat = Parameters<ImportService['preview']>[0]['format'];
 
 interface CsvValues {
   title: string;
@@ -17,7 +18,7 @@ interface CsvValues {
 }
 
 interface CsvVendorCase {
-  format: ImportFormat;
+  format: SupportedFixtureFormat;
   sourceName: string;
   record(values: CsvValues): Record<string, string>;
   title(values: CsvValues): string;
@@ -62,6 +63,73 @@ const normalTags = (values: CsvValues): string[] => values.tags;
 const noTags = (): string[] => [];
 
 const csvVendors: CsvVendorCase[] = [
+  {
+    format: 'dashlane-csv',
+    sourceName: 'dashlane-credentials.csv',
+    record: (value) => ({
+      username: value.username,
+      username2: '',
+      username3: '',
+      title: value.title,
+      password: value.password,
+      note: value.note,
+      url: value.website,
+      category: value.folder,
+      otpSecret: '',
+    }),
+    title: normalTitle,
+    note: normalNote,
+    folder: normalFolder,
+    tags: noTags,
+  },
+  {
+    format: 'nordpass-csv',
+    sourceName: 'nordpass.csv',
+    record: (value) => ({
+      name: value.title,
+      url: value.website,
+      username: value.username,
+      password: value.password,
+      note: value.note,
+      cardholdername: '',
+      cardnumber: '',
+      cvc: '',
+      expirydate: '',
+      zipcode: '',
+      folder: value.folder,
+      full_name: '',
+      phone_number: '',
+      email: '',
+      address1: '',
+      address2: '',
+      city: '',
+      country: '',
+      state: '',
+      totp: '',
+      shared_folder: '',
+    }),
+    title: normalTitle,
+    note: normalNote,
+    folder: normalFolder,
+    tags: noTags,
+  },
+  {
+    format: 'roboform-csv',
+    sourceName: 'roboform.csv',
+    record: (value) => ({
+      Name: value.title,
+      Url: value.website,
+      Login: value.username,
+      Pwd: value.password,
+      Note: value.note,
+      Folder: value.folder,
+      Rf_fields: '',
+    }),
+    title: normalTitle,
+    note: normalNote,
+    folder: normalFolder,
+    tags: noTags,
+  },
   {
     format: 'onepassword-csv',
     sourceName: '1password.csv',

@@ -10,5 +10,8 @@ Die Dateien bilden die nativen Klartext-Exportstrukturen der unterstützten Hers
 - `firefox.csv`: `url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged`
 - `bitwarden.json`: unverschlüsselter JSON-Export mit `folders`, `items`, `login` und `fields`
 - `proton-pass.json`: JSON-Export mit `vaults`, `items`, `data.metadata`, `data.content` und `data.extraFields`
+- `dashlane-credentials.csv`: Dashlane-`credentials` mit `username`, `title`, `password`, `url`, `category` und `otpSecret`
+- `nordpass.csv`: NordPass-CSV mit der vollstaendigen dokumentierten Spaltensignatur einschliesslich `totp` und `shared_folder`
+- `roboform.csv`: RoboForm-CSV mit `Name`, `Url`, `Login`, `Pwd` und `Rf_fields`
 
 Generisches CSV und JSON werden separat mit expliziter Feldzuordnung getestet, weil sie bewusst keinem Herstellerformat folgen.

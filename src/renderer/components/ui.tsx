@@ -16,7 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import type { ButtonHTMLAttributes, FormEvent, PropsWithChildren, ReactNode } from 'react';
-import { useEffect, useId, useRef, useState } from 'react';
+import { forwardRef, useEffect, useId, useRef, useState } from 'react';
 
 import type { ToastMessage } from '../types';
 
@@ -54,15 +54,13 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   active?: boolean;
 }
 
-export function IconButton({
-  label,
-  active = false,
-  className = '',
-  children,
-  ...props
-}: IconButtonProps) {
+export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
+  { label, active = false, className = '', children, ...props },
+  ref,
+) {
   return (
     <button
+      ref={ref}
       className={`icon-button ${active ? 'is-active' : ''} ${className}`}
       aria-label={label}
       title={label}
@@ -71,7 +69,7 @@ export function IconButton({
       {children}
     </button>
   );
-}
+});
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -131,6 +129,11 @@ export function Modal({
   const titleId = useId();
   const descriptionId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -138,7 +141,12 @@ export function Modal({
     const panel = panelRef.current;
     panel?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+        return;
+      }
       if (event.key !== 'Tab' || !panel) return;
       const controls = Array.from(
         panel.querySelectorAll<HTMLElement>(
@@ -160,7 +168,7 @@ export function Modal({
       document.removeEventListener('keydown', onKeyDown);
       previouslyFocused?.focus();
     };
-  }, [onClose, open]);
+  }, [open]);
 
   if (!open) return null;
 

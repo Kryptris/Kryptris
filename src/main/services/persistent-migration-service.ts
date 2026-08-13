@@ -33,7 +33,11 @@ import {
   type ProfileService,
   parseStoredProfileHeader,
 } from './profile-service';
-import { VAULT_DOCUMENT_FORMAT_VERSION } from './vault-service';
+import {
+  LEGACY_VAULT_DOCUMENT_FORMAT_VERSION,
+  VAULT_DOCUMENT_FORMAT_VERSION,
+  type VaultService,
+} from './vault-service';
 
 const MIGRATION_BACKUP_DIRECTORY = 'migration-backups';
 const MIGRATION_SNAPSHOT_EXTENSION = '.vaulta-backup';
@@ -58,6 +62,7 @@ export interface PersistentMigrationPayload {
   readonly relativePath: string;
   readonly version: number;
   readonly bytes: Buffer;
+  readonly assertAuthorized?: () => void;
 }
 
 export interface PersistentFormatAdapter {
@@ -92,6 +97,17 @@ export interface EmbeddedFormatInspector {
     relativePath: string,
     assertAuthorized: () => void,
   ) => Promise<number>;
+  readonly readVersionFromBytes?: (
+    bytes: Buffer,
+    relativePath: string,
+    assertAuthorized: () => void,
+  ) => Promise<number> | number;
+  readonly validateCurrent?: (
+    bytes: Buffer,
+    relativePath: string,
+    assertAuthorized: () => void,
+  ) => Promise<void> | void;
+  readonly migrations?: readonly ForwardMigrationStep<PersistentMigrationPayload>[];
 }
 
 export interface MigrationInspection {
@@ -112,7 +128,14 @@ interface DiscoveredArtifact {
   readonly plan: readonly ForwardMigrationStep<PersistentMigrationPayload>[];
 }
 
+interface DiscoveredEmbeddedArtifact {
+  readonly inspector: EmbeddedFormatInspector;
+  readonly sourceVersion: number;
+  readonly plan: readonly ForwardMigrationStep<PersistentMigrationPayload>[];
+}
+
 interface PreparedArtifact extends DiscoveredArtifact {
+  readonly embedded: readonly DiscoveredEmbeddedArtifact[];
   readonly bytes: Buffer;
   readonly rollbackBytes: Buffer;
   readonly source: MigrationSnapshotSourceExpectation;
@@ -152,9 +175,9 @@ interface ActiveMigrationTransaction {
 /**
  * Central migration boundary for every live persistent Vaulta format.
  *
- * The current product baseline is version 1. No v0 semantics are registered.
- * Consequently v1 is an idempotent no-op, an unknown future version is rejected,
- * and any future writer migration must pass through the snapshot-first commit path.
+ * Outer file formats remain at their explicit baselines while embedded formats may
+ * advance independently. Unknown future versions are rejected, and every writer
+ * migration passes through the same snapshot-first, byte-rollback commit path.
  */
 export class PersistentMigrationService {
   private readonly rootDir: string;
@@ -197,9 +220,15 @@ export class PersistentMigrationService {
     await this.recoverInterruptedWrites();
     const artifacts = await this.inspectArtifacts();
     assertAuthorized();
-    await this.inspectEmbeddedArtifacts(artifacts, assertAuthorized);
+    const embeddedArtifacts = await this.inspectEmbeddedArtifacts(artifacts, assertAuthorized);
     assertAuthorized();
-    const pending = artifacts.filter((artifact) => artifact.plan.length > 0);
+    const pending = artifacts.filter(
+      (artifact) =>
+        artifact.plan.length > 0 ||
+        (embeddedArtifacts.get(artifact.relativePath) ?? []).some(
+          (embedded) => embedded.plan.length > 0,
+        ),
+    );
     if (pending.length === 0) {
       return {
         inspectedFiles: artifacts.length,
@@ -209,7 +238,15 @@ export class PersistentMigrationService {
       };
     }
 
-    const prepared = await Promise.all(pending.map((artifact) => this.prepare(artifact)));
+    const prepared = await Promise.all(
+      pending.map((artifact) =>
+        this.prepare(
+          artifact,
+          embeddedArtifacts.get(artifact.relativePath) ?? [],
+          assertAuthorized,
+        ),
+      ),
+    );
     assertAuthorized();
     const backupPath = await this.createSnapshot(artifacts, prepared, assertAuthorized);
     assertAuthorized();
@@ -228,6 +265,14 @@ export class PersistentMigrationService {
           assertAuthorized();
           const temporary = await readFile(temporaryPath);
           await artifact.adapter.validateCurrent(temporary, artifact.relativePath);
+          for (const embedded of artifact.embedded) {
+            if (embedded.inspector.validateCurrent === undefined) continue;
+            await embedded.inspector.validateCurrent(
+              temporary,
+              artifact.relativePath,
+              assertAuthorized,
+            );
+          }
           assertAuthorized();
         },
         async () => {
@@ -303,7 +348,12 @@ export class PersistentMigrationService {
     return artifacts.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   }
 
-  private async prepare(artifact: DiscoveredArtifact): Promise<PreparedArtifact> {
+  private async prepare(
+    artifact: DiscoveredArtifact,
+    embedded: readonly DiscoveredEmbeddedArtifact[],
+    assertAuthorized: () => void,
+  ): Promise<PreparedArtifact> {
+    assertAuthorized();
     const source = await readFile(artifact.filePath);
     if (
       (await artifact.adapter.readVersionFromBytes(source, artifact.relativePath)) !==
@@ -314,17 +364,53 @@ export class PersistentMigrationService {
         'Persistente Daten wurden während der Migrationsvorbereitung verändert.',
       );
     }
-    const result = await dispatcherFor(artifact.adapter).migrate({
-      relativePath: artifact.relativePath,
-      version: artifact.sourceVersion,
-      bytes: source,
-    });
-    if (!result.migrated) {
-      throw new VaultaError('INTERNAL', 'Eine geplante Migration hat keine Änderung erzeugt.');
+    let bytes: Buffer = source;
+    if (artifact.plan.length > 0) {
+      const result = await dispatcherFor(artifact.adapter).migrate({
+        relativePath: artifact.relativePath,
+        version: artifact.sourceVersion,
+        bytes,
+        assertAuthorized,
+      });
+      if (!result.migrated) {
+        throw new VaultaError('INTERNAL', 'Eine geplante Migration hat keine Änderung erzeugt.');
+      }
+      bytes = result.value.bytes;
+    }
+    for (const embeddedArtifact of embedded) {
+      if (embeddedArtifact.plan.length === 0) continue;
+      const readVersionFromBytes = embeddedArtifact.inspector.readVersionFromBytes;
+      if (readVersionFromBytes === undefined) {
+        throw new VaultaError('INTERNAL', 'Der eingebettete Migrationsadapter ist unvollständig.');
+      }
+      assertAuthorized();
+      if (
+        (await readVersionFromBytes(bytes, artifact.relativePath, assertAuthorized)) !==
+        embeddedArtifact.sourceVersion
+      ) {
+        throw new VaultaError(
+          'CONFLICT',
+          'Eingebettete Daten wurden während der Migrationsvorbereitung verändert.',
+        );
+      }
+      const result = await embeddedDispatcherFor(embeddedArtifact.inspector).migrate({
+        relativePath: artifact.relativePath,
+        version: embeddedArtifact.sourceVersion,
+        bytes,
+        assertAuthorized,
+      });
+      if (!result.migrated) {
+        throw new VaultaError(
+          'INTERNAL',
+          'Eine geplante eingebettete Migration hat keine Änderung erzeugt.',
+        );
+      }
+      bytes = result.value.bytes;
     }
     return {
       ...artifact,
-      bytes: result.value.bytes,
+      embedded,
+      bytes,
       rollbackBytes: source,
       source: { size: source.length, sha256: createHash('sha256').update(source).digest('hex') },
     };
@@ -780,25 +866,33 @@ export class PersistentMigrationService {
   private async inspectEmbeddedArtifacts(
     artifacts: readonly DiscoveredArtifact[],
     assertAuthorized: () => void,
-  ): Promise<void> {
+  ): Promise<Map<string, readonly DiscoveredEmbeddedArtifact[]>> {
+    const discovered = new Map<string, readonly DiscoveredEmbeddedArtifact[]>();
     for (const artifact of artifacts) {
-      for (const inspector of this.embeddedInspectors) {
-        if (!inspector.matches(artifact.relativePath)) continue;
+      const matches = this.embeddedInspectors.filter((inspector) =>
+        inspector.matches(artifact.relativePath),
+      );
+      if (matches.length > 1) {
+        throw new VaultaError(
+          'INTERNAL',
+          `Für ${artifact.relativePath} sind mehrere eingebettete Migrationsadapter registriert.`,
+        );
+      }
+      const entries: DiscoveredEmbeddedArtifact[] = [];
+      for (const inspector of matches) {
         assertAuthorized();
-        const version = await inspector.readVersion(
+        const sourceVersion = await inspector.readVersion(
           artifact.filePath,
           artifact.relativePath,
           assertAuthorized,
         );
-        new ForwardMigrationDispatcher<number>({
-          formatName: inspector.formatName,
-          currentVersion: inspector.currentVersion,
-          readVersion: (value) => value,
-          validateCurrent: () => undefined,
-        }).plan(version);
+        const plan = embeddedDispatcherFor(inspector).plan(sourceVersion);
+        entries.push({ inspector, sourceVersion, plan });
         assertAuthorized();
       }
+      if (entries.length > 0) discovered.set(artifact.relativePath, entries);
     }
+    return discovered;
   }
 
   private async assertArtifactUnchanged(artifact: PreparedArtifact): Promise<void> {
@@ -905,12 +999,16 @@ export class PersistentMigrationService {
         throw new VaultaError('INTERNAL', 'Migrationsadapter benötigen eindeutige IDs.');
       }
       identifiers.add(inspector.id);
-      new ForwardMigrationDispatcher<number>({
-        formatName: inspector.formatName,
-        currentVersion: inspector.currentVersion,
-        readVersion: (value) => value,
-        validateCurrent: () => undefined,
-      });
+      if (
+        (inspector.migrations?.length ?? 0) > 0 &&
+        (inspector.readVersionFromBytes === undefined || inspector.validateCurrent === undefined)
+      ) {
+        throw new VaultaError(
+          'INTERNAL',
+          'Schreibende eingebettete Migrationsadapter benötigen Byte-Prüfung und Zielvalidierung.',
+        );
+      }
+      embeddedDispatcherFor(inspector);
     }
   }
 }
@@ -925,6 +1023,81 @@ function dispatcherFor(
     validateCurrent: (value) => adapter.validateCurrent(value.bytes, value.relativePath),
     ...(adapter.migrations === undefined ? {} : { steps: adapter.migrations }),
   });
+}
+
+function embeddedDispatcherFor(
+  inspector: EmbeddedFormatInspector,
+): ForwardMigrationDispatcher<PersistentMigrationPayload> {
+  return new ForwardMigrationDispatcher({
+    formatName: inspector.formatName,
+    currentVersion: inspector.currentVersion,
+    readVersion: (value) => value.version,
+    validateCurrent: async (value) => {
+      if (inspector.validateCurrent === undefined) return;
+      await inspector.validateCurrent(
+        value.bytes,
+        value.relativePath,
+        value.assertAuthorized ?? (() => undefined),
+      );
+    },
+    ...(inspector.migrations === undefined ? {} : { steps: inspector.migrations }),
+  });
+}
+
+export function createVaultDocumentEmbeddedMigrationAdapter(
+  vaultService: VaultService,
+): EmbeddedFormatInspector {
+  return {
+    id: 'vault-document',
+    formatName: 'Vaulta-Tresorinhalt',
+    currentVersion: VAULT_DOCUMENT_FORMAT_VERSION,
+    matches: (relativePath) => /^vaults\/[A-Za-z0-9_-]+\.vaulta$/u.test(relativePath),
+    readVersion: async (filePath, relativePath, assertAuthorized) => {
+      assertAuthorized();
+      const version = await vaultService.inspectDocumentBytes(
+        vaultIdFromRelativePath(relativePath),
+        await readFile(filePath),
+        assertAuthorized,
+      );
+      assertAuthorized();
+      return version;
+    },
+    readVersionFromBytes: (bytes, relativePath, assertAuthorized) =>
+      vaultService.inspectDocumentBytes(
+        vaultIdFromRelativePath(relativePath),
+        bytes,
+        assertAuthorized,
+      ),
+    validateCurrent: (bytes, relativePath, assertAuthorized) =>
+      vaultService.validateCurrentDocumentBytes(
+        vaultIdFromRelativePath(relativePath),
+        bytes,
+        assertAuthorized,
+      ),
+    migrations: [
+      {
+        fromVersion: LEGACY_VAULT_DOCUMENT_FORMAT_VERSION,
+        toVersion: VAULT_DOCUMENT_FORMAT_VERSION,
+        migrate: async (value) => ({
+          ...value,
+          version: VAULT_DOCUMENT_FORMAT_VERSION,
+          bytes: await vaultService.migrateDocumentBytesV1ToV2(
+            vaultIdFromRelativePath(value.relativePath),
+            value.bytes,
+            value.assertAuthorized ?? (() => undefined),
+          ),
+        }),
+      },
+    ],
+  };
+}
+
+function vaultIdFromRelativePath(relativePath: string): string {
+  const match = /^vaults\/([A-Za-z0-9_-]+)\.vaulta$/u.exec(relativePath);
+  if (match?.[1] === undefined) {
+    throw new VaultaError('INTERNAL', 'Der Tresor-Migrationspfad ist ungültig.');
+  }
+  return match[1];
 }
 
 function defaultAdapters(): readonly PersistentFormatAdapter[] {

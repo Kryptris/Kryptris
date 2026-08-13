@@ -1,20 +1,38 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 import { VaultaError } from '../../shared/errors';
-import type { EntryInput, VaultDocument, VaultEntry, VaultSummary } from '../../shared/models';
-import { requireCurrentFormatVersion } from '../migrations/format-version';
+import {
+  createDefaultEntryLifecycleMetadata,
+  type EntryInput,
+  type VaultDocument,
+  type VaultDocumentV1,
+  type VaultEntry,
+  type VaultSummary,
+} from '../../shared/models';
+import {
+  entryInputSchema,
+  vaultDocumentV1Schema,
+  vaultDocumentV2Schema,
+} from '../../shared/schemas';
+import { normalizeTags } from '../../shared/tags';
 import { CryptoService } from '../security/crypto-service';
 import { AtomicFileWriter } from '../storage/atomic-file';
 import { EncryptedContainerCodec } from '../storage/encrypted-container';
 import { assertSafeIdentifier, resolveInside } from '../storage/path-safety';
 import { SerialExecutor } from '../storage/serial-executor';
-import type { ProfileService, ProtectedMetadataValue } from './profile-service';
+import { EntryLifecycleService } from './entry-lifecycle-service';
+import type {
+  PreparedProtectedMetadataWrite,
+  ProfileService,
+  ProtectedMetadataValue,
+} from './profile-service';
 
 const VAULT_KEYS_NAMESPACE = 'vault-keys';
 const VAULT_EXTENSION = '.vaulta';
-export const VAULT_DOCUMENT_FORMAT_VERSION = 1 as const;
+export const VAULT_DOCUMENT_FORMAT_VERSION = 2 as const;
+export const LEGACY_VAULT_DOCUMENT_FORMAT_VERSION = 1 as const;
 
 type VaultKeyRegistry = Record<string, string>;
 
@@ -24,42 +42,91 @@ export interface VaultServiceOptions {
   crypto?: CryptoService;
   containers?: EncryptedContainerCodec;
   atomicWriter?: AtomicFileWriter;
+  lifecycle?: EntryLifecycleService;
   now?: () => Date;
+}
+
+export interface PreparedVaultDocumentWrite {
+  readonly document: VaultDocument;
+  readonly relativePath: string;
+  readonly contents: Buffer;
+  readonly expectedSha256: string;
+}
+
+/**
+ * An encrypted new-vault generation plus the matching protected key-registry
+ * generation. The caller owns both buffers and commits them in one wider
+ * transaction while the profile writer is held.
+ */
+export interface PreparedNewVaultWrite {
+  readonly document: VaultDocument;
+  readonly relativePath: string;
+  readonly contents: Buffer;
+  readonly expectedSha256: null;
+  readonly profileWrite: PreparedProtectedMetadataWrite;
+  /**
+   * Main-process-only target key for writing already verified attachment bytes
+   * into encrypted staging files before the surrounding transaction commits.
+   * The caller must overwrite it after staging or on every error path.
+   */
+  readonly vaultKey: Buffer;
+}
+
+export interface StoredVaultInventory {
+  readonly vaultIds: string[];
+  readonly invalidEntryCount: number;
 }
 
 export function readVaultDocumentFormatVersion(value: unknown): number {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new VaultaError('CORRUPT_DATA', 'Der Tresorcontainer ist beschädigt.');
   }
-  return requireCurrentFormatVersion(
-    'formatVersion' in value ? value.formatVersion : undefined,
-    VAULT_DOCUMENT_FORMAT_VERSION,
-    'Vaulta-Tresorinhalt',
-  );
+  const version = 'formatVersion' in value ? value.formatVersion : undefined;
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0) {
+    throw new VaultaError('CORRUPT_DATA', 'Die Vaulta-Tresorinhalt-Formatversion ist ungültig.');
+  }
+  if (version > VAULT_DOCUMENT_FORMAT_VERSION) {
+    throw new VaultaError(
+      'UNSUPPORTED_FORMAT',
+      `Vaulta-Tresorinhalt verwendet die neuere Formatversion ${version}; unterstützt wird Version ${VAULT_DOCUMENT_FORMAT_VERSION}.`,
+      'Öffne diese Daten mit einer neueren Vaulta-Version. Die Datei wurde nicht verändert.',
+    );
+  }
+  return version;
 }
 
-function parseVaultDocument(value: unknown, expectedId: string): VaultDocument {
-  readVaultDocumentFormatVersion(value);
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    Array.isArray(value) ||
-    !('id' in value) ||
-    value.id !== expectedId ||
-    !('name' in value) ||
-    typeof value.name !== 'string' ||
-    !('color' in value) ||
-    typeof value.color !== 'string' ||
-    !('createdAt' in value) ||
-    typeof value.createdAt !== 'string' ||
-    !('updatedAt' in value) ||
-    typeof value.updatedAt !== 'string' ||
-    !('folders' in value) ||
-    !Array.isArray(value.folders) ||
-    !('entries' in value) ||
-    !Array.isArray(value.entries)
-  ) {
-    throw new VaultaError('CORRUPT_DATA', 'Der Tresorinhalt ist ungültig.');
+export function parseVaultDocumentV1(value: unknown, expectedId: string): VaultDocumentV1 {
+  const version = readVaultDocumentFormatVersion(value);
+  if (version !== LEGACY_VAULT_DOCUMENT_FORMAT_VERSION) {
+    throw new VaultaError(
+      'UNSUPPORTED_FORMAT',
+      `Der V1-Leser akzeptiert keine Tresorinhalte der Formatversion ${version}.`,
+      'Die Datei wurde nicht verändert.',
+    );
+  }
+  const result = vaultDocumentV1Schema.safeParse(value);
+  if (!result.success || result.data.id !== expectedId) {
+    throw new VaultaError('CORRUPT_DATA', 'Der V1-Tresorinhalt ist ungültig.', null, {
+      ...(result.success ? {} : { cause: result.error }),
+    });
+  }
+  return value as VaultDocumentV1;
+}
+
+export function parseVaultDocumentV2(value: unknown, expectedId: string): VaultDocument {
+  const version = readVaultDocumentFormatVersion(value);
+  if (version !== VAULT_DOCUMENT_FORMAT_VERSION) {
+    throw new VaultaError(
+      'UNSUPPORTED_FORMAT',
+      `Der Tresorinhalt verwendet Formatversion ${version} und muss vor der normalen Verwendung auf Version ${VAULT_DOCUMENT_FORMAT_VERSION} migriert werden.`,
+      'Die Datei wurde nicht verändert.',
+    );
+  }
+  const result = vaultDocumentV2Schema.safeParse(value);
+  if (!result.success || result.data.id !== expectedId) {
+    throw new VaultaError('CORRUPT_DATA', 'Der V2-Tresorinhalt ist ungültig.', null, {
+      ...(result.success ? {} : { cause: result.error }),
+    });
   }
   return value as VaultDocument;
 }
@@ -86,12 +153,48 @@ function requireEntry(document: VaultDocument, entryId: string): VaultEntry {
   return entry;
 }
 
+function assertValidEntryInput(input: EntryInput): void {
+  const result = entryInputSchema.safeParse(input);
+  if (!result.success) {
+    throw new VaultaError('INVALID_INPUT', 'Der Eintrag enthält ungültige Werte.', null, {
+      cause: result.error,
+    });
+  }
+}
+
 function secretState(entry: VaultEntry | EntryInput): string {
+  const data = (() => {
+    switch (entry.data.type) {
+      case 'credential':
+        return {
+          password: entry.data.value.password,
+          totpSecret: entry.data.value.totp?.secret ?? null,
+        };
+      case 'wifi':
+        return { wifiPassword: entry.data.value.password };
+      case 'credit-card':
+        return {
+          cardNumber: entry.data.value.number,
+          cardCvc: entry.data.value.cvc,
+          cardPin: entry.data.value.pin,
+        };
+      case 'software-license':
+        return { licenseKey: entry.data.value.licenseKey };
+      case 'ssh-key':
+        return {
+          sshPrivateKey: entry.data.value.privateKey,
+          sshPassphrase: entry.data.value.passphrase,
+        };
+      default:
+        return null;
+    }
+  })();
   return JSON.stringify({
-    data: entry.data,
+    data,
     secretFields: entry.customFields
       .filter((field) => field.secret)
-      .map((field) => [field.id, field.value]),
+      .map((field) => [field.id, field.value] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
   });
 }
 
@@ -101,6 +204,7 @@ export class VaultService {
   private readonly crypto: CryptoService;
   private readonly containers: EncryptedContainerCodec;
   private readonly atomicWriter: AtomicFileWriter;
+  private readonly lifecycle: EntryLifecycleService;
   private readonly now: () => Date;
   private readonly registryWrites = new SerialExecutor();
   private readonly vaultWrites = new Map<string, SerialExecutor>();
@@ -118,6 +222,7 @@ export class VaultService {
     this.crypto = options.crypto ?? new CryptoService();
     this.containers = options.containers ?? new EncryptedContainerCodec(this.crypto);
     this.atomicWriter = options.atomicWriter ?? new AtomicFileWriter();
+    this.lifecycle = options.lifecycle ?? new EntryLifecycleService();
     this.now = options.now ?? (() => new Date());
   }
 
@@ -173,6 +278,68 @@ export class VaultService {
     }
     assertAuthorized();
     return documents;
+  }
+
+  /**
+   * Enumerates only technical vault identifiers from the on-disk directory.
+   * Invalid directory entries are counted without returning their names.
+   */
+  public async inspectStoredVaultInventory(
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<StoredVaultInventory> {
+    assertAuthorized();
+    const entries = await readdir(this.vaultsDir, { withFileTypes: true }).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    });
+    const vaultIds = new Set<string>();
+    let invalidEntryCount = 0;
+    for (const entry of entries) {
+      assertAuthorized();
+      if (!entry.isFile() || !entry.name.endsWith(VAULT_EXTENSION)) {
+        invalidEntryCount += 1;
+        continue;
+      }
+      const vaultId = entry.name.slice(0, -VAULT_EXTENSION.length);
+      try {
+        assertSafeIdentifier(vaultId, 'Tresor-ID');
+      } catch {
+        invalidEntryCount += 1;
+        continue;
+      }
+      if (vaultIds.has(vaultId)) {
+        invalidEntryCount += 1;
+        continue;
+      }
+      vaultIds.add(vaultId);
+    }
+    assertAuthorized();
+    return { vaultIds: [...vaultIds].sort(), invalidEntryCount };
+  }
+
+  /** Returns the authenticated technical vault-key registry without exposing key material. */
+  public async listRegisteredVaultIds(
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<string[]> {
+    assertAuthorized();
+    const vaultIds = Object.keys(await this.readKeyRegistry()).sort();
+    assertAuthorized();
+    return vaultIds;
+  }
+
+  /**
+   * Reads and authenticates the current on-disk container without consulting or
+   * populating the decrypted document cache.
+   */
+  public async readVaultFresh(
+    vaultId: string,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<VaultDocument> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertAuthorized();
+    const document = await this.readVaultFromStorage(vaultId, assertAuthorized);
+    assertAuthorized();
+    return structuredClone(document);
   }
 
   public async withVaultKey<T>(
@@ -250,18 +417,165 @@ export class VaultService {
     this.pendingReads.clear();
   }
 
-  private async readVaultFromStorage(vaultId: string): Promise<VaultDocument> {
+  /**
+   * Serializes one operation against every writer for the supplied vaults.
+   * Callers must acquire all vaults in this single sorted call to avoid lock inversion.
+   */
+  public async withExclusiveVaults<T>(
+    vaultIds: readonly string[],
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const unique = [...new Set(vaultIds)].sort();
+    if (unique.length === 0) {
+      throw new VaultaError('INVALID_INPUT', 'Mindestens ein Tresor muss gesperrt werden.');
+    }
+    unique.forEach((vaultId) => assertSafeIdentifier(vaultId, 'Tresor-ID'));
+
+    const acquire = async (index: number): Promise<T> => {
+      const vaultId = unique[index];
+      if (vaultId === undefined) return operation();
+      return this.executorFor(vaultId).run(async () => acquire(index + 1));
+    };
+    return acquire(0);
+  }
+
+  /**
+   * Serializes a wider transaction with vault creation and deletion. Callers
+   * that prepare a replacement key registry must retain this lock until their
+   * profile generation is committed, otherwise a concurrent create/delete
+   * could publish a stale registry snapshot afterwards.
+   */
+  public async withExclusiveRegistryWrite<T>(operation: () => Promise<T>): Promise<T> {
+    return this.registryWrites.run(operation);
+  }
+
+  /**
+   * Creates and verifies the encrypted bytes for a wider file transaction without
+   * changing the live file or decrypted cache.
+   */
+  public async prepareDocumentWrite(document: VaultDocument): Promise<PreparedVaultDocumentWrite> {
+    assertSafeIdentifier(document.id, 'Tresor-ID');
+    parseVaultDocumentV2(document, document.id);
+    const target = this.vaultPath(document.id);
+    await this.atomicWriter.recoverPreviousIfTargetMissing(target);
+    const sourceBytes = await readFile(target).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new VaultaError('NOT_FOUND', 'Der Tresor wurde nicht gefunden.');
+      }
+      throw error;
+    });
+    const expectedSha256 = createHash('sha256').update(sourceBytes).digest('hex');
+    const key = await this.getVaultKey(document.id);
+    try {
+      const contents = this.containers.encodeJson(document, key, 'vault', document.id);
+      parseVaultDocumentV2(
+        this.containers.decodeJson<unknown>(contents, key, 'vault', document.id),
+        document.id,
+      );
+      return {
+        document: structuredClone(document),
+        relativePath: `vaults/${document.id}${VAULT_EXTENSION}`,
+        contents,
+        expectedSha256,
+      };
+    } finally {
+      this.crypto.erase(key);
+      this.crypto.erase(sourceBytes);
+    }
+  }
+
+  /**
+   * Prepares a completely new local vault and its fresh random key seed without
+   * publishing either file. Package import uses this so the vault container,
+   * protected key registry, attachments and audit entry can share one atomic
+   * commit. Callers must hold `withExclusiveRegistryWrite` and
+   * `ProfileService.withExclusiveWrite` until that commit has completed.
+   */
+  public async prepareNewVaultWrite(document: VaultDocument): Promise<PreparedNewVaultWrite> {
+    assertSafeIdentifier(document.id, 'Tresor-ID');
+    this.validateVaultAppearance(document.name, document.color);
+    parseVaultDocumentV2(document, document.id);
+
+    const target = this.vaultPath(document.id);
+    await readFile(target).then(
+      () => {
+        throw new VaultaError(
+          'CONFLICT',
+          'Ein Tresor mit dieser technischen ID existiert bereits.',
+        );
+      },
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+      },
+    );
+
+    const registry = await this.readKeyRegistry();
+    if (registry[document.id] !== undefined) {
+      throw new VaultaError('CONFLICT', 'Ein Tresor mit dieser technischen ID existiert bereits.');
+    }
+
+    const seed = this.crypto.randomBytes(32);
+    const key = this.crypto.deriveKey(
+      seed,
+      `vault-data:${document.id}`,
+      Buffer.from(document.id, 'utf8'),
+    );
+    let retainedKey = false;
+    try {
+      const contents = this.containers.encodeJson(document, key, 'vault', document.id);
+      parseVaultDocumentV2(
+        this.containers.decodeJson<unknown>(contents, key, 'vault', document.id),
+        document.id,
+      );
+      registry[document.id] = seed.toString('base64');
+      const profileWrite = await this.profileService.prepareProtectedMetadataUpdates({
+        [VAULT_KEYS_NAMESPACE]: registry,
+      });
+      retainedKey = true;
+      return {
+        document: structuredClone(document),
+        relativePath: `vaults/${document.id}${VAULT_EXTENSION}`,
+        contents,
+        expectedSha256: null,
+        profileWrite,
+        vaultKey: key,
+      };
+    } finally {
+      this.crypto.erase(seed);
+      if (!retainedKey) this.crypto.erase(key);
+    }
+  }
+
+  /** Publishes decrypted cache generations only after the wider file commit succeeded. */
+  public installCommittedDocuments(documents: readonly VaultDocument[]): void {
+    for (const document of documents) {
+      parseVaultDocumentV2(document, document.id);
+      this.documentCache.set(document.id, structuredClone(document));
+      this.pendingReads.delete(document.id);
+    }
+  }
+
+  private async readVaultFromStorage(
+    vaultId: string,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<VaultDocument> {
+    assertAuthorized();
     const key = await this.getVaultKey(vaultId);
     try {
+      assertAuthorized();
       await this.atomicWriter.recoverPreviousIfTargetMissing(this.vaultPath(vaultId));
+      assertAuthorized();
       const bytes = await readFile(this.vaultPath(vaultId)).catch((error) => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           throw new VaultaError('NOT_FOUND', 'Der Tresor wurde nicht gefunden.');
         }
         throw error;
       });
+      assertAuthorized();
       const value = this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId);
-      return parseVaultDocument(value, vaultId);
+      const document = parseVaultDocumentV2(value, vaultId);
+      assertAuthorized();
+      return document;
     } finally {
       this.crypto.erase(key);
     }
@@ -269,14 +583,84 @@ export class VaultService {
 
   public async inspectStoredDocumentFormatVersion(vaultId: string): Promise<number> {
     assertSafeIdentifier(vaultId, 'Tresor-ID');
+    await this.atomicWriter.recoverPreviousIfTargetMissing(this.vaultPath(vaultId));
+    return this.inspectDocumentBytes(vaultId, await readFile(this.vaultPath(vaultId)));
+  }
+
+  /** Reads and strictly validates a V1 or V2 document inside encrypted vault bytes. */
+  public async inspectDocumentBytes(
+    vaultId: string,
+    bytes: Buffer,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<number> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertAuthorized();
     const key = await this.getVaultKey(vaultId);
     try {
-      await this.atomicWriter.recoverPreviousIfTargetMissing(this.vaultPath(vaultId));
-      const bytes = await readFile(this.vaultPath(vaultId));
+      assertAuthorized();
       const value = this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId);
       const version = readVaultDocumentFormatVersion(value);
-      parseVaultDocument(value, vaultId);
+      if (version === LEGACY_VAULT_DOCUMENT_FORMAT_VERSION) parseVaultDocumentV1(value, vaultId);
+      else parseVaultDocumentV2(value, vaultId);
+      assertAuthorized();
       return version;
+    } finally {
+      this.crypto.erase(key);
+    }
+  }
+
+  /** Accepts only a fully encrypted vault target containing the current V2 document. */
+  public async validateCurrentDocumentBytes(
+    vaultId: string,
+    bytes: Buffer,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<void> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertAuthorized();
+    const key = await this.getVaultKey(vaultId);
+    try {
+      assertAuthorized();
+      parseVaultDocumentV2(
+        this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId),
+        vaultId,
+      );
+      assertAuthorized();
+    } finally {
+      this.crypto.erase(key);
+    }
+  }
+
+  /** Produces a complete encrypted V2 target while retaining the original V1 ciphertext. */
+  public async migrateDocumentBytesV1ToV2(
+    vaultId: string,
+    bytes: Buffer,
+    assertAuthorized: () => void = () => undefined,
+  ): Promise<Buffer> {
+    assertSafeIdentifier(vaultId, 'Tresor-ID');
+    assertAuthorized();
+    const key = await this.getVaultKey(vaultId);
+    try {
+      assertAuthorized();
+      const legacy = parseVaultDocumentV1(
+        this.containers.decodeJson<unknown>(bytes, key, 'vault', vaultId),
+        vaultId,
+      );
+      const migrated: VaultDocument = {
+        ...legacy,
+        formatVersion: VAULT_DOCUMENT_FORMAT_VERSION,
+        entries: legacy.entries.map((entry) => ({
+          ...entry,
+          lifecycle: createDefaultEntryLifecycleMetadata(),
+        })),
+      };
+      assertAuthorized();
+      const target = this.containers.encodeJson(migrated, key, 'vault', vaultId);
+      parseVaultDocumentV2(
+        this.containers.decodeJson<unknown>(target, key, 'vault', vaultId),
+        vaultId,
+      );
+      assertAuthorized();
+      return target;
     } finally {
       this.crypto.erase(key);
     }
@@ -296,7 +680,7 @@ export class VaultService {
 
   public async replaceVault(document: VaultDocument): Promise<void> {
     assertSafeIdentifier(document.id, 'Tresor-ID');
-    parseVaultDocument(document, document.id);
+    parseVaultDocumentV2(document, document.id);
     await this.executorFor(document.id).run(async () => {
       const replacement: VaultDocument = {
         ...document,
@@ -328,6 +712,7 @@ export class VaultService {
   }
 
   public async createEntry(vaultId: string, input: EntryInput): Promise<VaultEntry> {
+    assertValidEntryInput(input);
     return this.mutateVault(vaultId, (document) => {
       const id = input.id ?? randomUUID();
       assertSafeIdentifier(id, 'Eintrags-ID');
@@ -337,9 +722,15 @@ export class VaultService {
       const now = this.now().toISOString();
       const entry: VaultEntry = {
         ...input,
+        tags: normalizeTags(input.tags),
         id,
         vaultId,
         attachments: [],
+        lifecycle: this.lifecycle.afterSecretChange(
+          input.data.type,
+          input.lifecycle ?? createDefaultEntryLifecycleMetadata(),
+          now,
+        ),
         createdAt: now,
         updatedAt: now,
         secretChangedAt: now,
@@ -357,17 +748,24 @@ export class VaultService {
     input: EntryInput,
   ): Promise<VaultEntry> {
     assertSafeIdentifier(entryId, 'Eintrags-ID');
+    assertValidEntryInput(input);
     return this.mutateVault(vaultId, (document) => {
       const existing = requireEntry(document, entryId);
       const changedSecret = secretState(existing) !== secretState(input);
+      const updatedAt = this.now().toISOString();
+      const lifecycleSource = input.lifecycle ?? existing.lifecycle;
       const replacement: VaultEntry = {
         ...input,
+        tags: normalizeTags(input.tags),
         id: existing.id,
         vaultId,
         attachments: existing.attachments,
+        lifecycle: changedSecret
+          ? this.lifecycle.afterSecretChange(input.data.type, lifecycleSource, updatedAt)
+          : this.lifecycle.normalizeForType(input.data.type, lifecycleSource),
         createdAt: existing.createdAt,
-        updatedAt: this.now().toISOString(),
-        secretChangedAt: changedSecret ? this.now().toISOString() : existing.secretChangedAt,
+        updatedAt,
+        secretChangedAt: changedSecret ? updatedAt : existing.secretChangedAt,
         lastUsedAt: existing.lastUsedAt,
         deletedAt: existing.deletedAt,
       };
@@ -459,7 +857,7 @@ export class VaultService {
     const target = this.vaultPath(document.id);
     await this.atomicWriter.writeFile(target, bytes, async (temporaryPath) => {
       const temporary = await readFile(temporaryPath);
-      parseVaultDocument(
+      parseVaultDocumentV2(
         this.containers.decodeJson<unknown>(temporary, key, 'vault', document.id),
         document.id,
       );

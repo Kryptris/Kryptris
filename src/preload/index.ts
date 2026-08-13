@@ -1,7 +1,75 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import { IPC_CHANNELS, type IpcResult, type VaultaApi } from '../shared/ipc';
-import type { AppState } from '../shared/models';
+import type { AppState, LocalJobProgressEvent } from '../shared/models';
+
+const DROPPED_IMPORT_TOKEN_TTL_MS = 60_000;
+
+interface PendingDroppedImport {
+  readonly sourcePath: string;
+  readonly expiresAt: number;
+}
+
+const pendingDroppedImports = new Map<string, PendingDroppedImport>();
+const droppedImportListeners = new Set<(drop: { token: string }) => void>();
+
+function isLocalWindowsFilePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/](?![\\/])/u.test(value) && !value.includes('\0');
+}
+
+function isImportDropTarget(target: EventTarget | null): boolean {
+  const element = target as { closest?: (selector: string) => Element | null } | null;
+  const closest = element?.closest?.('[data-vaulta-import-drop-target]');
+  return closest !== undefined && closest !== null;
+}
+
+function pruneDroppedImports(now = Date.now()): void {
+  for (const [token, pending] of pendingDroppedImports) {
+    if (pending.expiresAt <= now) pendingDroppedImports.delete(token);
+  }
+}
+
+function notifyDroppedImport(file: File): void {
+  const sourcePath = webUtils.getPathForFile(file);
+  if (!isLocalWindowsFilePath(sourcePath)) return;
+  pruneDroppedImports();
+  const token = globalThis.crypto.randomUUID();
+  pendingDroppedImports.set(token, {
+    sourcePath,
+    expiresAt: Date.now() + DROPPED_IMPORT_TOKEN_TTL_MS,
+  });
+  for (const listener of droppedImportListeners) listener({ token });
+}
+
+function installDroppedImportCapture(): void {
+  if (typeof window === 'undefined') return;
+  window.addEventListener(
+    'dragover',
+    (event) => {
+      if (isImportDropTarget(event.target) && event.dataTransfer?.types.includes('Files')) {
+        event.preventDefault();
+      }
+    },
+    true,
+  );
+  window.addEventListener(
+    'drop',
+    (event) => {
+      const files = event.dataTransfer?.files;
+      if (!isImportDropTarget(event.target) || files === undefined || files.length !== 1) {
+        return;
+      }
+      event.preventDefault();
+      const file = files.item(0);
+      if (file !== null) notifyDroppedImport(file);
+    },
+    true,
+  );
+  window.addEventListener('beforeunload', () => pendingDroppedImports.clear(), { once: true });
+  ipcRenderer.on(IPC_CHANNELS.eventLocked, () => pendingDroppedImports.clear());
+}
+
+installDroppedImportCapture();
 
 async function invoke<T>(channel: string, input?: unknown): Promise<T> {
   const result = (await ipcRenderer.invoke(channel, input)) as IpcResult<T>;
@@ -79,16 +147,59 @@ const api: VaultaApi = {
   },
   security: {
     scan: (vaultId) => invoke(IPC_CHANNELS.securityScan, vaultId),
+    scanCenter: (input) => invoke(IPC_CHANNELS.securityCenterScan, input),
+    getRecoveryReadiness: () => invoke(IPC_CHANNELS.securityRecoveryStatus),
+    testRecoveryReadiness: (input) => invoke(IPC_CHANNELS.securityRecoveryTest, input),
+    scanIntegrity: (input) => invoke(IPC_CHANNELS.securityIntegrityScan, input),
+    saveIntegrityReport: (input) => invoke(IPC_CHANNELS.securityIntegritySaveReport, input),
+    getBreachListStatus: () => invoke(IPC_CHANNELS.securityBreachStatus),
+    importBreachList: (input) => invoke(IPC_CHANNELS.securityBreachImport, input),
+    scanBreachList: (input) => invoke(IPC_CHANNELS.securityBreachScan, input),
+    removeBreachList: () => invoke(IPC_CHANNELS.securityBreachRemove),
   },
   backup: {
     create: (input) => invoke(IPC_CHANNELS.backupCreate, input),
+    getHealth: (input) => invoke(IPC_CHANNELS.backupHealth, input),
+    dryRun: (input) => invoke(IPC_CHANNELS.backupDryRun, input),
     restore: (input) => invoke(IPC_CHANNELS.backupRestore, input),
     chooseFolder: () => invoke(IPC_CHANNELS.backupChooseFolder),
   },
   transfer: {
     previewImport: (input) => invoke(IPC_CHANNELS.importPreview, input),
+    previewDroppedImport: (input) => {
+      const safeInput = input ?? { token: '', vaultId: '' };
+      pruneDroppedImports();
+      const pending = pendingDroppedImports.get(safeInput.token);
+      if (pending === undefined)
+        return invoke(IPC_CHANNELS.importPreviewDropped, {
+          vaultId: safeInput.vaultId,
+          ...(safeInput.format === undefined ? {} : { format: safeInput.format }),
+          ...(safeInput.mapping === undefined ? {} : { mapping: safeInput.mapping }),
+          // Missing or expired tokens still reach the guarded Main boundary;
+          // Zod rejects this sentinel and no renderer-controlled path is used.
+          sourcePath: '',
+        });
+      pendingDroppedImports.delete(safeInput.token);
+      return invoke(IPC_CHANNELS.importPreviewDropped, {
+        vaultId: safeInput.vaultId,
+        ...(safeInput.format === undefined ? {} : { format: safeInput.format }),
+        ...(safeInput.mapping === undefined ? {} : { mapping: safeInput.mapping }),
+        sourcePath: pending.sourcePath,
+      });
+    },
+    onDroppedImport: (callback) => {
+      if (typeof callback !== 'function') return () => undefined;
+      droppedImportListeners.add(callback);
+      return () => droppedImportListeners.delete(callback);
+    },
     remapImport: (input) => invoke(IPC_CHANNELS.importRemap, input),
     executeImport: (input) => invoke(IPC_CHANNELS.importExecute, input),
+    listMappingProfiles: () => invoke(IPC_CHANNELS.importMappingProfiles),
+    saveMappingProfile: (input) => invoke(IPC_CHANNELS.importMappingProfileSave, input),
+    removeMappingProfile: (input) => invoke(IPC_CHANNELS.importMappingProfileRemove, input),
+    exportVaultPackage: (input) => invoke(IPC_CHANNELS.vaultPackageExport, input),
+    previewVaultPackage: (input) => invoke(IPC_CHANNELS.vaultPackagePreviewImport, input),
+    importVaultPackage: (input) => invoke(IPC_CHANNELS.vaultPackageImport, input),
     export: (input) => invoke(IPC_CHANNELS.exportExecute, input),
   },
   audit: {
@@ -117,6 +228,26 @@ const api: VaultaApi = {
   reports: {
     generate: () => invoke(IPC_CHANNELS.reportGenerate),
   },
+  productivity: {
+    batch: (input) => invoke(IPC_CHANNELS.productivityBatch, input),
+    listSavedViews: (vaultId) => invoke(IPC_CHANNELS.productivitySavedViewList, vaultId),
+    saveSavedView: (input) => invoke(IPC_CHANNELS.productivitySavedViewSave, input),
+    reorderSavedViews: (input) => invoke(IPC_CHANNELS.productivitySavedViewReorder, input),
+    deleteSavedView: (input) => invoke(IPC_CHANNELS.productivitySavedViewDelete, input),
+    listTags: (vaultId) => invoke(IPC_CHANNELS.productivityTagList, vaultId),
+    renameTag: (input) => invoke(IPC_CHANNELS.productivityTagRename, input),
+    mergeTags: (input) => invoke(IPC_CHANNELS.productivityTagMerge, input),
+    deleteTag: (input) => invoke(IPC_CHANNELS.productivityTagDelete, input),
+  },
+  quality: {
+    scanDuplicates: (input) => invoke(IPC_CHANNELS.qualityDuplicateScan, input),
+    describeDuplicateMerge: (input) => invoke(IPC_CHANNELS.qualityDuplicateDescribe, input),
+    mergeDuplicates: (input) => invoke(IPC_CHANNELS.qualityDuplicateMerge, input),
+    scanDataQuality: (input) => invoke(IPC_CHANNELS.qualityDataScan, input),
+    previewDataQualityFix: (input) => invoke(IPC_CHANNELS.qualityDataFixPreview, input),
+    applyDataQualityFix: (input) => invoke(IPC_CHANNELS.qualityDataFixApply, input),
+    cancelJob: (input) => invoke(IPC_CHANNELS.localJobCancel, input),
+  },
   window: {
     minimize: () => invoke(IPC_CHANNELS.windowMinimize),
     toggleMaximize: () => invoke(IPC_CHANNELS.windowToggleMaximize),
@@ -128,6 +259,8 @@ const api: VaultaApi = {
     onClipboardCleared: (callback) => onEvent<void>(IPC_CHANNELS.eventClipboardCleared, callback),
     onBackgroundWarning: (callback) =>
       onEvent<string>(IPC_CHANNELS.eventBackgroundWarning, callback),
+    onLocalJobProgress: (callback) =>
+      onEvent<LocalJobProgressEvent>(IPC_CHANNELS.eventLocalJobProgress, callback),
   },
 };
 

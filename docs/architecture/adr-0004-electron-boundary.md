@@ -2,7 +2,7 @@
 
 - Status: angenommen
 - Datum: 14. Juli 2026
-- Bezug: Welle 0 und 5
+- Bezug: Welle 0, 5, 10 und 11
 
 ## Entscheidung
 
@@ -19,7 +19,14 @@ Jeder IPC-Handler:
 - validiert ein strikt begrenztes Schema,
 - ruft genau eine fachliche Operation auf,
 - serialisiert Fehler ohne Stack/Details,
-- liefert Geheimnisse nur bei bewusster Reveal-Aktion; Copy bleibt vollständig im Main-Prozess.
+  - liefert Geheimnisse nur bei bewusster Reveal-Aktion; Copy bleibt vollständig im Main-Prozess.
+
+Native Komfortpfade erweitern diese Grenze nicht: Drag-and-drop-Pfade bleiben im Preload hinter
+kurzlebigen Einmal-Tokens und werden im Main-Prozess descriptor-gebunden geprüft. Die
+Windows-Integration aus Welle 11 ist eine Main-Prozess-Policy, keine Renderer- oder IPC-Brücke:
+Tray-Menü und Benachrichtigungen enthalten nur den Sperrstatus beziehungsweise einen allgemeinen
+lokalen Hinweis, nie Tresor-, Eintrags- oder Geheimdaten. Ein Klick sperrt vor dem Öffnen; laufende
+Erinnerungen werden beim Sperren invalidiert.
 
 BrowserWindow nutzt `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`, deaktivierte Navigation/Popups und Content Protection. Berechtigungen sind standardmäßig verweigert. Remote-Requests, Remote-Ressourcen, `webview`, `eval`, `new Function` und unvalidierte externe Links sind verboten. Produktions-CSP: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'` plus restriktive Basis-/Frame-/Objektregeln.
 

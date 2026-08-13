@@ -284,12 +284,92 @@ export function registerIpcHandlers(options: RegisterHandlersOptions): void {
     requestSchema<string | undefined>(IPC_CHANNELS.securityScan),
     (input) => controller.scanSecurity(input),
   );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityCenterScan,
+    requestSchema<Parameters<VaultaApi['security']['scanCenter']>[0]>(
+      IPC_CHANNELS.securityCenterScan,
+    ),
+    (input) => controller.scanSecurityCenter(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityRecoveryStatus,
+    requestSchema<undefined>(IPC_CHANNELS.securityRecoveryStatus),
+    () => controller.getRecoveryReadiness(),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityRecoveryTest,
+    requestSchema<Parameters<VaultaApi['security']['testRecoveryReadiness']>[0]>(
+      IPC_CHANNELS.securityRecoveryTest,
+    ),
+    (input) => controller.testRecoveryReadiness(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityIntegrityScan,
+    requestSchema<Parameters<VaultaApi['security']['scanIntegrity']>[0]>(
+      IPC_CHANNELS.securityIntegrityScan,
+    ),
+    (input) => controller.scanIntegrity(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityIntegritySaveReport,
+    requestSchema<Parameters<VaultaApi['security']['saveIntegrityReport']>[0]>(
+      IPC_CHANNELS.securityIntegritySaveReport,
+    ),
+    (input) => controller.saveIntegrityReport(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityBreachStatus,
+    requestSchema<undefined>(IPC_CHANNELS.securityBreachStatus),
+    () => controller.getBreachListStatus(),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityBreachImport,
+    requestSchema<Parameters<VaultaApi['security']['importBreachList']>[0]>(
+      IPC_CHANNELS.securityBreachImport,
+    ),
+    (input) => controller.importBreachList(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityBreachScan,
+    requestSchema<Parameters<VaultaApi['security']['scanBreachList']>[0]>(
+      IPC_CHANNELS.securityBreachScan,
+    ),
+    (input) => controller.scanBreachList(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.securityBreachRemove,
+    requestSchema<undefined>(IPC_CHANNELS.securityBreachRemove),
+    () => controller.removeBreachList(),
+  );
 
   registerSafeHandler(
     context,
     IPC_CHANNELS.backupCreate,
     requestSchema<{ automatic?: boolean } | undefined>(IPC_CHANNELS.backupCreate),
     (input) => controller.createBackup(input),
+  );
+
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.backupHealth,
+    requestSchema<Parameters<VaultaApi['backup']['getHealth']>[0]>(IPC_CHANNELS.backupHealth),
+    (input) => controller.getBackupHealth(input),
+  );
+
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.backupDryRun,
+    requestSchema<Parameters<VaultaApi['backup']['dryRun']>[0]>(IPC_CHANNELS.backupDryRun),
+    (input) => controller.dryRunBackup(input),
   );
   registerSafeHandler(
     context,
@@ -314,6 +394,14 @@ export function registerIpcHandlers(options: RegisterHandlersOptions): void {
   );
   registerSafeHandler(
     context,
+    IPC_CHANNELS.importPreviewDropped,
+    requestSchema<Parameters<VaultaController['previewDroppedImport']>[0]>(
+      IPC_CHANNELS.importPreviewDropped,
+    ),
+    (input) => controller.previewDroppedImport(input),
+  );
+  registerSafeHandler(
+    context,
     IPC_CHANNELS.importRemap,
     requestSchema<Parameters<VaultaApi['transfer']['remapImport']>[0]>(IPC_CHANNELS.importRemap),
     (input) => controller.remapImport(input),
@@ -325,6 +413,55 @@ export function registerIpcHandlers(options: RegisterHandlersOptions): void {
       IPC_CHANNELS.importExecute,
     ),
     (input) => controller.executeImport(input),
+  );
+
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.importMappingProfiles,
+    requestSchema<undefined>(IPC_CHANNELS.importMappingProfiles),
+    () => controller.listImportMappingProfiles(),
+  );
+
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.importMappingProfileSave,
+    requestSchema<Parameters<VaultaApi['transfer']['saveMappingProfile']>[0]>(
+      IPC_CHANNELS.importMappingProfileSave,
+    ),
+    (input) => controller.saveImportMappingProfile(input),
+  );
+
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.importMappingProfileRemove,
+    requestSchema<Parameters<VaultaApi['transfer']['removeMappingProfile']>[0]>(
+      IPC_CHANNELS.importMappingProfileRemove,
+    ),
+    (input) => controller.removeImportMappingProfile(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.vaultPackageExport,
+    requestSchema<Parameters<VaultaApi['transfer']['exportVaultPackage']>[0]>(
+      IPC_CHANNELS.vaultPackageExport,
+    ),
+    (input) => controller.exportVaultPackage(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.vaultPackagePreviewImport,
+    requestSchema<Parameters<VaultaApi['transfer']['previewVaultPackage']>[0]>(
+      IPC_CHANNELS.vaultPackagePreviewImport,
+    ),
+    (input) => controller.previewVaultPackage(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.vaultPackageImport,
+    requestSchema<Parameters<VaultaApi['transfer']['importVaultPackage']>[0]>(
+      IPC_CHANNELS.vaultPackageImport,
+    ),
+    (input) => controller.importVaultPackage(input),
   );
   registerSafeHandler(
     context,
@@ -441,6 +578,128 @@ export function registerIpcHandlers(options: RegisterHandlersOptions): void {
     IPC_CHANNELS.reportGenerate,
     requestSchema<undefined>(IPC_CHANNELS.reportGenerate),
     () => controller.generateReport(),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivityBatch,
+    requestSchema<Parameters<VaultaApi['productivity']['batch']>[0]>(
+      IPC_CHANNELS.productivityBatch,
+    ),
+    (input) => controller.runProductivityBatch(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivitySavedViewList,
+    requestSchema<string>(IPC_CHANNELS.productivitySavedViewList),
+    (vaultId) => controller.listSavedViews(vaultId),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivitySavedViewSave,
+    requestSchema<Parameters<VaultaApi['productivity']['saveSavedView']>[0]>(
+      IPC_CHANNELS.productivitySavedViewSave,
+    ),
+    (input) => controller.saveSavedView(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivitySavedViewReorder,
+    requestSchema<Parameters<VaultaApi['productivity']['reorderSavedViews']>[0]>(
+      IPC_CHANNELS.productivitySavedViewReorder,
+    ),
+    (input) => controller.reorderSavedViews(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivitySavedViewDelete,
+    requestSchema<Parameters<VaultaApi['productivity']['deleteSavedView']>[0]>(
+      IPC_CHANNELS.productivitySavedViewDelete,
+    ),
+    (input) => controller.deleteSavedView(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivityTagList,
+    requestSchema<string>(IPC_CHANNELS.productivityTagList),
+    (vaultId) => controller.listTags(vaultId),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivityTagRename,
+    requestSchema<Parameters<VaultaApi['productivity']['renameTag']>[0]>(
+      IPC_CHANNELS.productivityTagRename,
+    ),
+    (input) => controller.renameTag(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivityTagMerge,
+    requestSchema<Parameters<VaultaApi['productivity']['mergeTags']>[0]>(
+      IPC_CHANNELS.productivityTagMerge,
+    ),
+    (input) => controller.mergeTags(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.productivityTagDelete,
+    requestSchema<Parameters<VaultaApi['productivity']['deleteTag']>[0]>(
+      IPC_CHANNELS.productivityTagDelete,
+    ),
+    (input) => controller.deleteTag(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDuplicateScan,
+    requestSchema<Parameters<VaultaApi['quality']['scanDuplicates']>[0]>(
+      IPC_CHANNELS.qualityDuplicateScan,
+    ),
+    (input) => controller.scanDuplicates(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDuplicateDescribe,
+    requestSchema<Parameters<VaultaApi['quality']['describeDuplicateMerge']>[0]>(
+      IPC_CHANNELS.qualityDuplicateDescribe,
+    ),
+    (input) => controller.describeDuplicateMerge(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDuplicateMerge,
+    requestSchema<Parameters<VaultaApi['quality']['mergeDuplicates']>[0]>(
+      IPC_CHANNELS.qualityDuplicateMerge,
+    ),
+    (input) => controller.mergeDuplicates(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDataScan,
+    requestSchema<Parameters<VaultaApi['quality']['scanDataQuality']>[0]>(
+      IPC_CHANNELS.qualityDataScan,
+    ),
+    (input) => controller.scanDataQuality(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDataFixPreview,
+    requestSchema<Parameters<VaultaApi['quality']['previewDataQualityFix']>[0]>(
+      IPC_CHANNELS.qualityDataFixPreview,
+    ),
+    (input) => controller.previewDataQualityFix(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.qualityDataFixApply,
+    requestSchema<Parameters<VaultaApi['quality']['applyDataQualityFix']>[0]>(
+      IPC_CHANNELS.qualityDataFixApply,
+    ),
+    (input) => controller.applyDataQualityFix(input),
+  );
+  registerSafeHandler(
+    context,
+    IPC_CHANNELS.localJobCancel,
+    requestSchema<Parameters<VaultaApi['quality']['cancelJob']>[0]>(IPC_CHANNELS.localJobCancel),
+    (input) => controller.cancelLocalJob(input.requestId),
   );
 
   registerSafeHandler(

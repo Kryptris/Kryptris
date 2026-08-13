@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { DuplicateService } from '../../src/main/services/duplicate-service';
 import { ImportService } from '../../src/main/services/import-service';
 import { credentialEntry } from './service-fixtures';
 
@@ -73,6 +74,85 @@ describe('ImportService', () => {
     expect(preview.candidates[0]?.duplicateOf).toBe('entry-1');
     expect(preview.candidates[0]?.selected).toBe(false);
     expect(JSON.stringify(preview)).not.toContain('Users');
+  });
+
+  it('nutzt für bestehende Einträge die normalisierten typspezifischen Merkmale', () => {
+    const service = new ImportService();
+    const existing = credentialEntry({
+      id: 'existing-entry',
+      title: 'Bestehender Titel',
+      username: 'User@Example.DE',
+      websites: ['https://login.example.de/account'],
+    });
+    const preview = service.preview({
+      format: 'generic-csv',
+      sourceName: 'normalisiert.csv',
+      content: [
+        'name,username,password,url',
+        'Abweichender Titel,user@example.de,anderes-passwort,login.example.de/neuer-pfad',
+      ].join('\n'),
+      existingEntries: [existing],
+    });
+
+    expect(preview.candidates[0]).toMatchObject({
+      duplicateOf: 'existing-entry',
+      selected: false,
+    });
+    expect(preview.candidates[0]?.warnings).toContain('Moegliche Dublette erkannt.');
+  });
+
+  it('erkennt Dubletten innerhalb derselben Importdatei über denselben Matcher', () => {
+    const service = new ImportService();
+    const preview = service.preview({
+      format: 'generic-csv',
+      sourceName: 'interne-dubletten.csv',
+      content: [
+        'name,username,password,url',
+        'Erster Titel,konto@example.de,erstes-passwort,https://portal.example.de/eins',
+        'Zweiter Titel,konto@example.de,zweites-passwort,https://portal.example.de/zwei',
+      ].join('\n'),
+    });
+
+    expect(preview.candidates).toHaveLength(2);
+    expect(preview.candidates[0]).toMatchObject({ duplicateOf: null, selected: true });
+    expect(preview.candidates[1]).toMatchObject({
+      duplicateOf: 'import:0',
+      selected: false,
+    });
+    expect(preview.candidates[1]?.warnings).toContain('Moegliche Dublette erkannt.');
+  });
+
+  it('vergleicht Geheimnisse nur im kurzlebigen Matcher und redigiert die Vorschau', () => {
+    const comparisonKey = Buffer.alloc(32, 0x5a);
+    const canary = 'CANARY_IMPORT_SECRET_DO_NOT_EXPOSE';
+    const service = new ImportService({
+      duplicates: new DuplicateService({
+        createHmacKey: () => comparisonKey,
+        yieldControl: () => Promise.resolve(),
+      }),
+    });
+    const preview = service.preview({
+      format: 'bitwarden-json',
+      sourceName: 'notizen.json',
+      content: JSON.stringify({
+        encrypted: false,
+        items: [
+          { type: 2, name: 'Lokale Notiz A', notes: canary },
+          { type: 2, name: 'Lokale Notiz B', notes: canary },
+        ],
+      }),
+    });
+
+    expect(preview.candidates[1]).toMatchObject({
+      duplicateOf: 'import:0',
+      selected: false,
+    });
+    expect(JSON.stringify(preview)).not.toContain(canary);
+    expect(comparisonKey.every((value) => value === 0)).toBe(true);
+    expect(service.materialize(preview.token, [1])[0]?.entry.data).toMatchObject({
+      type: 'secure-note',
+      value: { markdown: canary },
+    });
   });
 
   it('importiert Proton Pass und behaelt den Tresornamen als Ordnerhinweis', () => {

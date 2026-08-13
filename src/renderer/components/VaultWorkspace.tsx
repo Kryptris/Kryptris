@@ -86,6 +86,8 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   const [detail, setDetail] = useState<EntryDetail | null>(null);
   const [entriesLoading, setEntriesLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailSelectionRevision, setDetailSelectionRevision] = useState(0);
+  const [pendingImportedEntryIds, setPendingImportedEntryIds] = useState<string[] | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [vaultManagerOpen, setVaultManagerOpen] = useState(false);
   const [folderManagerOpen, setFolderManagerOpen] = useState(false);
@@ -125,6 +127,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   const detailRequestGeneration = useRef(0);
   const selectedEntryIdRef = useRef<string | null>(null);
   const selectedEntryIdsRef = useRef<string[]>([]);
+  const importedEntryIdsRef = useRef<string[]>([]);
   const activeVaultIdRef = useRef<string | null>(null);
   const isEntrySectionRef = useRef(false);
 
@@ -155,6 +158,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     selectedEntryIdRef.current = primaryEntryId;
     setDetail(null);
     setDetailLoading(primaryEntryId !== null && isEntrySectionRef.current);
+    setDetailSelectionRevision((revision) => revision + 1);
     setSelectedEntryIds(nextEntryIds);
     setSelectedEntryId(primaryEntryId);
   }, []);
@@ -172,6 +176,11 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
     },
     [],
   );
+
+  useEffect(() => {
+    if (section !== 'import') importedEntryIdsRef.current = [];
+    if (section !== 'all') setPendingImportedEntryIds(null);
+  }, [section]);
 
   const closeSidebar = useCallback((returnFocus = false) => {
     setSidebarOpen(false);
@@ -451,7 +460,15 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
 
   useEffect(() => {
     if (isEntrySection) void loadDetail();
-  }, [isEntrySection, loadDetail]);
+  }, [detailSelectionRevision, isEntrySection, loadDetail]);
+
+  useEffect(() => {
+    if (section !== 'all' || pendingImportedEntryIds === null) return;
+    const entryIds = pendingImportedEntryIds;
+    setPendingImportedEntryIds(null);
+    setEntrySelection(entryIds, entryIds[0] ?? null);
+    void loadEntries();
+  }, [loadEntries, pendingImportedEntryIds, section, setEntrySelection]);
 
   // Global shortcuts must be active with the visible workspace.
   // useEffect leaves a short post-render interval without a listener.
@@ -598,6 +615,11 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
   };
 
   const changeSection = (next: WorkspaceSection) => {
+    const importedEntryIds =
+      next === 'all' && section === 'import' && importedEntryIdsRef.current.length > 0
+        ? [...importedEntryIdsRef.current]
+        : null;
+    setPendingImportedEntryIds(importedEntryIds);
     setSection(next);
     if (next === 'settings') setSettingsInitialTab('security');
     setActiveSavedViewId(null);
@@ -1379,8 +1401,7 @@ export function VaultWorkspace({ state, onStateChange, notify }: VaultWorkspaceP
                 vaultId={activeVault.id}
                 notify={notify}
                 onImported={(entryIds) => {
-                  setEntrySelection(entryIds, entryIds[0] ?? null);
-                  void loadEntries();
+                  importedEntryIdsRef.current = [...entryIds];
                 }}
                 onOpenDuplicates={() => changeSection('quality')}
                 onPackageImported={(vaultId) => {

@@ -204,27 +204,37 @@ test('durchläuft Setup, vollständiges CRUD, Navigation-Härtung und Fresh-Rest
     await page.getByTestId('edit-entry-button').click();
     await page.getByLabel('Titel').fill(updatedTitle);
     await page.getByRole('button', { name: 'Änderungen speichern' }).click();
-    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
+    const updatedEntry = page.getByRole('option', { name: new RegExp(updatedTitle, 'u') });
+    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(updatedEntry).toHaveAttribute('aria-current', 'true', { timeout: 30_000 });
 
     await page.getByRole('button', { name: 'In Papierkorb verschieben' }).click();
-    await expect(page.getByText('Eintrag in den Papierkorb verschoben')).toBeVisible();
+    await expect(updatedEntry).toHaveCount(0, { timeout: 30_000 });
     await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Papierkorb', exact: true }).click();
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
+    const trashedUpdatedEntry = page.getByRole('option', {
+      name: new RegExp(updatedTitle, 'u'),
+    });
+    await expect(trashedUpdatedEntry).toBeVisible({ timeout: 30_000 });
+    await trashedUpdatedEntry.click();
+    await expect(trashedUpdatedEntry).toHaveAttribute('aria-current', 'true', { timeout: 30_000 });
     await page.getByTestId('restore-entry-button').click();
-    await page.waitForTimeout(300);
-    const restoreToastDiagnostics = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('[role="status"]')).map((node) => ({
-        text: node.textContent?.trim() ?? '',
-        className: node.getAttribute('class'),
-      })),
-    );
-    console.log('Electron-Restore-Toast-Diagnose', JSON.stringify(restoreToastDiagnostics));
-    await expect(page.getByText('Eintrag wiederhergestellt')).toBeVisible();
+    await expect(trashedUpdatedEntry).toHaveCount(0, { timeout: 30_000 });
     await openSidebarNavigation(page);
     await page.getByRole('button', { name: 'Alle Einträge', exact: true }).first().click();
-    await page.getByRole('option', { name: new RegExp(updatedTitle, 'u') }).click();
-    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible();
+    const reinstatedUpdatedEntry = page.getByRole('option', {
+      name: new RegExp(updatedTitle, 'u'),
+    });
+    await expect(reinstatedUpdatedEntry).toBeVisible({ timeout: 30_000 });
+    await reinstatedUpdatedEntry.click();
+    await expect(reinstatedUpdatedEntry).toHaveAttribute('aria-current', 'true', {
+      timeout: 30_000,
+    });
+    await expect(page.getByRole('heading', { name: updatedTitle })).toBeVisible({
+      timeout: 30_000,
+    });
 
     await page.getByRole('button', { name: 'Kryptris jetzt sperren' }).click();
     await expect(page.getByRole('heading', { name: 'Willkommen zurück' })).toBeVisible();

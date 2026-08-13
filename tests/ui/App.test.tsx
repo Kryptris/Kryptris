@@ -13,6 +13,7 @@ import {
   type EntrySummary,
   type ImportPreview,
   type SecurityCenterCardId,
+  type VaultEntry,
 } from '../../src/shared/models';
 
 const SECURITY_CENTER_CARD_IDS: SecurityCenterCardId[] = [
@@ -1038,6 +1039,93 @@ describe('Vaulta Renderer', () => {
     ).toBeInTheDocument();
   });
 
+  it('oeffnet frisch importierte Eintraege beim direkten Wechsel zu Alle Eintraege', async () => {
+    const api = createApi(unlockedState);
+    const importedEntry: EntrySummary = {
+      ...entrySummary,
+      id: 'entry-imported-1',
+      title: 'Synthetisch importierter Zugang',
+      subtitle: 'import@example.test',
+      favorite: false,
+      tags: [],
+    };
+    const importedDetail: EntryDetail = {
+      ...entryDetail,
+      id: importedEntry.id,
+      title: importedEntry.title,
+      favorite: false,
+      tags: [],
+    };
+    const preview: ImportPreview = {
+      token: '00000000-0000-4000-8000-000000000714',
+      format: 'chrome-csv',
+      sourceName: 'synthetischer-chrome-export.csv',
+      candidates: [
+        {
+          sourceIndex: 0,
+          title: importedEntry.title,
+          username: importedEntry.subtitle,
+          website: 'https://example.test',
+          type: 'credential',
+          duplicateOf: null,
+          warnings: [],
+          selected: true,
+        },
+      ],
+      errors: [],
+      detectedColumns: [],
+      mapping: null,
+    };
+    let importCompleted = false;
+    vi.mocked(api.transfer.previewImport).mockResolvedValue(preview);
+    vi.mocked(api.transfer.executeImport).mockImplementation(async () => {
+      importCompleted = true;
+      return {
+        imported: 1,
+        skipped: 0,
+        summary: { newEntries: 1, skippedEntries: 0, duplicates: 0, warnings: 0, invalidRows: 0 },
+        entryIds: [importedEntry.id],
+      };
+    });
+    vi.mocked(api.entries.list).mockImplementation(async () =>
+      importCompleted ? [importedEntry, entrySummary] : [entrySummary],
+    );
+    vi.mocked(api.entries.getDetail).mockImplementation(async ({ entryId }) =>
+      entryId === importedEntry.id ? importedDetail : entryDetail,
+    );
+    window.vaulta = api;
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Import' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Datei auswählen und lokal prüfen' }));
+    await screen.findByRole('heading', { name: preview.sourceName });
+    fireEvent.click(screen.getByRole('button', { name: 'Auswahl verschlüsselt importieren' }));
+
+    await waitFor(() => expect(api.transfer.executeImport).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('heading', { name: 'Daten importieren' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Alle Einträge$/u }));
+
+    const entryList = await screen.findByLabelText('Eintragsliste');
+    const importedOption = await within(entryList).findByRole('option', {
+      name: /Synthetisch importierter Zugang/u,
+    });
+    await waitFor(() => expect(importedOption).toHaveAttribute('aria-current', 'true'));
+    expect(
+      await screen.findByRole('heading', { name: 'Synthetisch importierter Zugang' }),
+    ).toBeInTheDocument();
+    expect(api.entries.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        vaultId: 'vault-1',
+        search: '',
+        view: 'all',
+        types: [],
+        tags: [],
+        folderId: null,
+        security: [],
+      }),
+    );
+  });
+
   it('prueft und importiert ein Tresor-Paket ueber den pfadlosen Renderer-Vertrag', async () => {
     const api = createApi(unlockedState);
     vi.mocked(api.transfer.previewVaultPackage).mockResolvedValue({
@@ -1328,6 +1416,72 @@ describe('Vaulta Renderer', () => {
       'aria-selected',
       'true',
     );
+  });
+
+  it('lädt das Detail nach dem Bearbeiten desselben ausgewählten Eintrags erneut', async () => {
+    const api = createApi(unlockedState);
+    const updatedTitle = 'GitHub aktualisiert';
+    const updatedSummary: EntrySummary = { ...entrySummary, title: updatedTitle };
+    const updatedDetail: EntryDetail = { ...entryDetail, title: updatedTitle };
+    const editModel: VaultEntry = {
+      id: entrySummary.id,
+      vaultId: entrySummary.vaultId,
+      title: entrySummary.title,
+      folderId: entrySummary.folderId,
+      tags: [...entrySummary.tags],
+      favorite: entrySummary.favorite,
+      note: entryDetail.note,
+      customFields: [],
+      attachments: [],
+      data: {
+        type: 'credential',
+        value: {
+          username: 'synthetisch@example.test',
+          password: 'synthetisches-passwort',
+          websites: [],
+          appNames: [],
+        },
+      },
+      lifecycle: structuredClone(entryDetail.lifecycle),
+      createdAt: entryDetail.createdAt,
+      updatedAt: entryDetail.updatedAt,
+      secretChangedAt: entryDetail.updatedAt,
+      lastUsedAt: null,
+      deletedAt: null,
+    };
+    let saved = false;
+    vi.mocked(api.entries.list).mockImplementation(async () => [
+      saved ? updatedSummary : entrySummary,
+    ]);
+    vi.mocked(api.entries.getDetail).mockImplementation(async () =>
+      saved ? updatedDetail : entryDetail,
+    );
+    vi.mocked(api.entries.getEditModel).mockResolvedValue(editModel);
+    vi.mocked(api.entries.update).mockImplementation(async () => {
+      saved = true;
+      return updatedSummary;
+    });
+    window.vaulta = api;
+
+    render(<App />);
+
+    await screen.findByRole('heading', { name: entrySummary.title });
+    fireEvent.click(screen.getByTestId('edit-entry-button'));
+    const editor = await screen.findByRole('dialog', { name: 'Eintrag bearbeiten' });
+    fireEvent.change(within(editor).getByLabelText('Titel'), { target: { value: updatedTitle } });
+    fireEvent.click(within(editor).getByRole('button', { name: 'Änderungen speichern' }));
+
+    expect(await screen.findByRole('heading', { name: updatedTitle })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(api.entries.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          vaultId: entrySummary.vaultId,
+          entryId: entrySummary.id,
+          entry: expect.objectContaining({ title: updatedTitle }),
+        }),
+      ),
+    );
+    expect(api.entries.getDetail).toHaveBeenCalledTimes(2);
   });
 
   it('verwirft ein verspätetes Detail nach einem Auswahlwechsel und mutiert nur den aktuellen Eintrag', async () => {

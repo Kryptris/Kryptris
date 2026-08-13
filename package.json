@@ -1,6 +1,6 @@
 {
   "name": "kryptris",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lokaler, vollständig offline nutzbarer Passwort-Manager für Windows",
   "main": "dist/main/main/index.js",
   "type": "commonjs",

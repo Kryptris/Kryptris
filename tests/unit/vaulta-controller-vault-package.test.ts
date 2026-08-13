@@ -15,6 +15,7 @@ import type {
 import type {
   MultiFileChange,
   MultiFileExecuteOptions,
+  MultiFileTransactionService,
 } from '../../src/main/storage/multi-file-transaction';
 import { VaultaController } from '../../src/main/vaulta-controller';
 import {
@@ -91,6 +92,11 @@ interface ControllerHarness {
   failNextTransaction(error: Error): void;
   lockImmediatelyAfterNextCommittedTransaction(): void;
   lastPlan(): PackagePlanHarness | null;
+}
+
+interface CreateHarnessOptions {
+  readonly rootDir?: string;
+  readonly useRealTransactions?: boolean;
 }
 
 const harnesses: ControllerHarness[] = [];
@@ -438,6 +444,60 @@ describe('VaultaController Tresor-Pakete', () => {
     await expect(readdir(outside)).resolves.toEqual(['sentinel.txt']);
   });
 
+  it('importiert ein Paket mit echter Transaktion unter einem Parent-Junction-Alias', async () => {
+    const outerRoot = await mkdtemp(path.join(os.tmpdir(), 'kryptris-parent-junction-'));
+    const physicalParent = path.join(outerRoot, 'physical-parent');
+    const physicalRoot = path.join(physicalParent, 'app-root');
+    const parentAlias = path.join(outerRoot, 'parent-alias');
+    const logicalRoot = path.join(parentAlias, 'app-root');
+    await mkdir(physicalRoot, { recursive: true, mode: 0o700 });
+    const linked = await createDirectoryAlias(physicalParent, parentAlias);
+    if (!linked) {
+      await rm(outerRoot, { recursive: true, force: true });
+      return;
+    }
+    const harness = await createHarness({ rootDir: logicalRoot, useRealTransactions: true });
+
+    try {
+      const transactions = privateValue<MultiFileTransactionService>(
+        harness.controller,
+        'transactions',
+      );
+      const execute = vi.spyOn(transactions, 'execute');
+      electronMocks.showOpenDialog.mockResolvedValueOnce({
+        canceled: false,
+        filePaths: [harness.packagePath],
+      });
+      const preview = await harness.controller.previewVaultPackage({
+        exportPassword: PACKAGE_PASSWORD,
+      });
+      if (preview === null) throw new Error('Die synthetische Paketvorschau fehlt.');
+
+      await expect(
+        harness.controller.importVaultPackage({
+          token: preview.token,
+          exportPassword: PACKAGE_PASSWORD,
+          targetVaultName: 'Anonymisierte Parent-Junction-Kopie',
+          allowNameConflict: false,
+        }),
+      ).resolves.toMatchObject({
+        vaultName: 'Anonymisierte Parent-Junction-Kopie',
+        attachmentCount: 1,
+      });
+
+      const writeFileChange = execute.mock.calls[0]?.[0].find(
+        (change): change is Extract<MultiFileChange, { type: 'write-file' }> =>
+          change.type === 'write-file',
+      );
+      expect(writeFileChange?.sourcePath).toBeDefined();
+      expect(writeFileChange?.sourcePath).not.toContain(parentAlias);
+      await expect(packageStagingEntries(physicalRoot)).resolves.toEqual([]);
+    } finally {
+      await rm(parentAlias, { recursive: true, force: true });
+      await rm(outerRoot, { recursive: true, force: true });
+    }
+  });
+
   it('verwirft einen spaet eingehängten Paket-Staging-Alias ohne externe Dateien zu bereinigen', async () => {
     const harness = await createHarness();
     const create = privateValue<() => Promise<PackageStagingCapability>>(
@@ -570,8 +630,11 @@ interface PackageStagingCapability {
   readonly directory: string;
 }
 
-async function createHarness(): Promise<ControllerHarness> {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), 'kryptris-controller-vault-package-'));
+async function createHarness(options: CreateHarnessOptions = {}): Promise<ControllerHarness> {
+  const rootDir =
+    options.rootDir ??
+    (await mkdtemp(path.join(os.tmpdir(), 'kryptris-controller-vault-package-')));
+  await mkdir(rootDir, { recursive: true, mode: 0o700 });
   const packagePath = path.resolve(rootDir, 'synthetisches-paket.kryptris-vault');
   const exportPath = path.resolve(rootDir, 'exportziel.kryptris-vault');
   await writeFile(packagePath, 'synthetic encrypted package fixture', { mode: 0o600 });
@@ -736,7 +799,7 @@ async function createHarness(): Promise<ControllerHarness> {
     withExclusiveWrite: <T>(operation: () => Promise<T>): Promise<T> => operation(),
     prepareRecord: prepareAuditRecord,
   });
-  Reflect.set(controller, 'transactions', { execute });
+  if (!options.useRealTransactions) Reflect.set(controller, 'transactions', { execute });
   Reflect.set(controller, 'emitState', emitState);
   Reflect.set(controller, 'localJobs', { invalidate: invalidateLocalJobs, clear: vi.fn() });
   Reflect.set(controller, 'entryViews', { clearCaches: clearEntryViewCaches });

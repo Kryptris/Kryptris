@@ -33,6 +33,46 @@ describe('AttachmentService Paket-Staging-Haertung', () => {
     expect(encrypted.toString('utf8')).not.toContain(input.contents.toString('utf8'));
   });
 
+  it('schreibt nach einem Parent-Junction-Swap weiter in das kanonische Staging-Verzeichnis', async () => {
+    const root = await temporaryRoot();
+    const physicalParent = path.join(root, 'physical-parent');
+    const aliasedParent = path.join(root, 'parent-alias');
+    const redirectedParent = path.join(root, 'redirected-parent');
+    const redirectedStagingDirectory = path.join(redirectedParent, 'staging');
+    const redirectedSentinel = path.join(redirectedParent, 'sentinel.txt');
+    await mkdir(physicalParent, { recursive: true, mode: 0o700 });
+    await mkdir(redirectedStagingDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(redirectedSentinel, 'unveraendert');
+    const linked = await createDirectoryAlias(physicalParent, aliasedParent);
+    if (!linked) return;
+
+    const stagingDirectory = path.join(aliasedParent, 'staging');
+    await mkdir(stagingDirectory, { recursive: true, mode: 0o700 });
+    let checks = 0;
+    let parentSwapSucceeded = false;
+    const input = packageStagingInput(stagingDirectory, async () => {
+      checks += 1;
+      if (checks !== 2) return;
+      await rm(aliasedParent, { recursive: true, force: true });
+      parentSwapSucceeded = await createDirectoryAlias(redirectedParent, aliasedParent);
+    });
+
+    await expect(attachmentService(root).encryptBufferToStaging(input)).resolves.toMatchObject({
+      id: ATTACHMENT_ID,
+      size: input.contents.length,
+    });
+    if (!parentSwapSucceeded) return;
+
+    await expect(
+      readFile(path.join(physicalParent, 'staging', `${ATTACHMENT_ID}.vatt`)),
+    ).resolves.toBeInstanceOf(Buffer);
+    await expect(readdir(redirectedStagingDirectory)).resolves.toEqual([]);
+    await expect(readFile(redirectedSentinel, 'utf8')).resolves.toBe('unveraendert');
+    await expect(readdir(path.join(physicalParent, 'staging'))).resolves.toEqual([
+      `${ATTACHMENT_ID}.vatt`,
+    ]);
+  });
+
   it('verweigert einen direkten oder Junction-Alias vor dem ersten verschluesselten Byte', async () => {
     const root = await temporaryRoot();
     const outside = path.join(root, 'outside');

@@ -633,17 +633,29 @@ export class AttachmentService {
     let noncePrefix: Buffer | null = null;
     let headerBytes: Buffer | null = null;
     try {
-      await this.assertOwnedPackageStagingDirectory(stagingDirectory, input.assertStagingDirectory);
+      const canonicalStagingDirectory = await this.assertOwnedPackageStagingDirectory(
+        stagingDirectory,
+        input.assertStagingDirectory,
+      );
+      const canonicalStagingPath = path.resolve(
+        canonicalStagingDirectory,
+        path.basename(stagingPath),
+      );
+      if (path.dirname(canonicalStagingPath) !== canonicalStagingDirectory) {
+        throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Pfad ist nicht controller-eigen.');
+      }
       input.assertAuthorized();
+      // Continue via the physical parent after the capability check. A later
+      // replacement of only a parent junction must not redirect this write.
       output = await open(
-        stagingPath,
+        canonicalStagingPath,
         constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
         0o600,
       );
       await this.assertOpenedPackageStagingFile(
         output,
-        stagingPath,
-        stagingDirectory,
+        canonicalStagingPath,
+        canonicalStagingDirectory,
         input.assertStagingDirectory,
       );
       input.assertAuthorized();
@@ -1082,12 +1094,15 @@ export class AttachmentService {
    * A package import receives its path only from the controller, but an
    * untrusted same-user process can still attempt to exchange a directory for
    * a junction between checks. Require both the controller capability and a
-   * direct canonical directory before a new descriptor is opened.
+   * direct directory whose filesystem identity still matches its canonical
+   * target before a new descriptor is opened. This deliberately permits a
+   * parent-path alias (for example the Windows TEMP junction), while still
+   * rejecting a junction at the staging-directory path itself.
    */
   private async assertOwnedPackageStagingDirectory(
     stagingDirectory: string,
     assertStagingDirectory: () => Promise<void> | void,
-  ): Promise<void> {
+  ): Promise<string> {
     await assertStagingDirectory();
     const initial = await lstat(stagingDirectory).catch((error) => {
       throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
@@ -1102,6 +1117,11 @@ export class AttachmentService {
         cause: error,
       });
     });
+    const canonicalEntry = await lstat(canonical).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
     const current = await lstat(stagingDirectory).catch((error) => {
       throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis ist nicht sicher.', null, {
         cause: error,
@@ -1110,12 +1130,15 @@ export class AttachmentService {
     if (
       current.isSymbolicLink() ||
       !current.isDirectory() ||
+      canonicalEntry.isSymbolicLink() ||
+      !canonicalEntry.isDirectory() ||
       !this.sameFilesystemIdentity(initial, current) ||
-      !this.samePath(canonical, stagingDirectory)
+      !this.sameFilesystemIdentity(initial, canonicalEntry)
     ) {
       throw new VaultaError('UNSAFE_PATH', 'Das Paket-Stagingverzeichnis wurde ausgetauscht.');
     }
     await assertStagingDirectory();
+    return canonical;
   }
 
   /**
@@ -1144,11 +1167,18 @@ export class AttachmentService {
         cause: error,
       });
     });
+    const canonicalEntry = await lstat(canonical).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang ist nicht sicher.', null, {
+        cause: error,
+      });
+    });
     if (
       current.isSymbolicLink() ||
       !current.isFile() ||
+      canonicalEntry.isSymbolicLink() ||
+      !canonicalEntry.isFile() ||
       !this.sameFilesystemIdentity(opened, current) ||
-      !this.samePath(canonical, stagingPath)
+      !this.sameFilesystemIdentity(opened, canonicalEntry)
     ) {
       throw new VaultaError('UNSAFE_PATH', 'Der Paket-Staging-Anhang wurde ausgetauscht.');
     }

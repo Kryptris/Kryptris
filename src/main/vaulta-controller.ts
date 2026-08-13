@@ -225,6 +225,8 @@ interface PackageFileIdentity {
 interface DirectoryIdentity {
   readonly dev: number;
   readonly ino: number;
+  /** Physical, junction-free path captured with the matching filesystem identity. */
+  readonly canonicalPath: string;
 }
 
 /**
@@ -301,15 +303,10 @@ const VAULT_PACKAGE_IMPORT_STAGING_DIRECTORY = '.vault-package-import-staging';
 const VAULT_PACKAGE_IMPORT_STAGING_ENTRY =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
-function sameCanonicalPath(left: string, right: string): boolean {
-  const normalizedLeft = path.resolve(left);
-  const normalizedRight = path.resolve(right);
-  return process.platform === 'win32'
-    ? normalizedLeft.toLocaleLowerCase('en') === normalizedRight.toLocaleLowerCase('en')
-    : normalizedLeft === normalizedRight;
-}
-
-function sameDirectoryIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
+function sameDirectoryIdentity(
+  left: Pick<DirectoryIdentity, 'dev' | 'ino'>,
+  right: Pick<DirectoryIdentity, 'dev' | 'ino'>,
+): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
@@ -4720,19 +4717,21 @@ export class VaultaController {
 
   /** Removes only encrypted, controller-owned package staging left by an interrupted import. */
   private async cleanupVaultPackageImportStaging(): Promise<void> {
-    const securityDirectory = await this.inspectBreachSecurityDirectory(false);
-    if (securityDirectory === null) return;
+    const requestedSecurityDirectory = await this.inspectBreachSecurityDirectory(false);
+    if (requestedSecurityDirectory === null) return;
     const securityIdentity = await this.inspectDirectVaultPackageDirectory(
-      securityDirectory,
+      requestedSecurityDirectory,
       'Das interne Stagingverzeichnis ist nicht sicher.',
     );
     if (securityIdentity === null) return;
-    const stagingRoot = path.resolve(securityDirectory, VAULT_PACKAGE_IMPORT_STAGING_DIRECTORY);
+    const securityDirectory = securityIdentity.canonicalPath;
+    let stagingRoot = path.resolve(securityDirectory, VAULT_PACKAGE_IMPORT_STAGING_DIRECTORY);
     const stagingRootIdentity = await this.inspectDirectVaultPackageDirectory(
       stagingRoot,
       'Das interne Tresor-Paket-Stagingverzeichnis ist nicht sicher.',
     );
     if (stagingRootIdentity === null) return;
+    stagingRoot = stagingRootIdentity.canonicalPath;
     await this.assertVaultPackageImportStagingRoot(
       securityDirectory,
       securityIdentity,
@@ -4777,12 +4776,13 @@ export class VaultaController {
   }
 
   private async createVaultPackageImportStagingDirectory(): Promise<VaultPackageImportStagingDirectory> {
-    const securityDirectory = await this.requireBreachSecurityDirectory();
+    const requestedSecurityDirectory = await this.requireBreachSecurityDirectory();
     const securityIdentity = await this.requireDirectVaultPackageDirectory(
-      securityDirectory,
+      requestedSecurityDirectory,
       'Das interne Stagingverzeichnis ist nicht sicher.',
     );
-    const stagingRoot = path.resolve(securityDirectory, VAULT_PACKAGE_IMPORT_STAGING_DIRECTORY);
+    const securityDirectory = securityIdentity.canonicalPath;
+    let stagingRoot = path.resolve(securityDirectory, VAULT_PACKAGE_IMPORT_STAGING_DIRECTORY);
     let stagingRootIdentity = await this.inspectDirectVaultPackageDirectory(
       stagingRoot,
       'Das interne Tresor-Paket-Stagingverzeichnis ist nicht sicher.',
@@ -4798,13 +4798,14 @@ export class VaultaController {
         'Das interne Tresor-Paket-Stagingverzeichnis ist nicht sicher.',
       );
     }
+    stagingRoot = stagingRootIdentity.canonicalPath;
     await this.assertVaultPackageImportStagingRoot(
       securityDirectory,
       securityIdentity,
       stagingRoot,
       stagingRootIdentity,
     );
-    const directory = path.resolve(stagingRoot, randomUUID());
+    let directory = path.resolve(stagingRoot, randomUUID());
     if (path.dirname(directory) !== stagingRoot) {
       throw new VaultaError('INTERNAL', 'Das Paket-Stagingziel konnte nicht bestimmt werden.');
     }
@@ -4815,6 +4816,7 @@ export class VaultaController {
         directory,
         'Das Paket-Stagingziel ist nicht sicher.',
       );
+      directory = directoryIdentity.canonicalPath;
       staging = {
         securityDirectory,
         securityIdentity,
@@ -4996,12 +4998,24 @@ export class VaultaController {
         },
       );
     });
+    const canonicalInfo = await lstat(canonical).catch((error) => {
+      throw new VaultaError(
+        'UNSAFE_PATH',
+        'Der verschluesselte Paket-Anhang ist nicht sicher.',
+        null,
+        {
+          cause: error,
+        },
+      );
+    });
     const current = await lstat(resolved);
     if (
       current.isSymbolicLink() ||
       !current.isFile() ||
+      canonicalInfo.isSymbolicLink() ||
+      !canonicalInfo.isFile() ||
       !samePackageFileIdentity(initial, current) ||
-      !sameCanonicalPath(canonical, resolved)
+      !samePackageFileIdentity(initial, canonicalInfo)
     ) {
       throw new VaultaError('UNSAFE_PATH', 'Der verschluesselte Paket-Anhang wurde ausgetauscht.');
     }
@@ -5110,6 +5124,9 @@ export class VaultaController {
     const canonical = await realpath(resolved).catch((error) => {
       throw new VaultaError('UNSAFE_PATH', message, null, { cause: error });
     });
+    const canonicalInfo = await lstat(canonical).catch((error) => {
+      throw new VaultaError('UNSAFE_PATH', message, null, { cause: error });
+    });
     const current = await lstat(resolved).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return null;
       throw error;
@@ -5118,12 +5135,14 @@ export class VaultaController {
       current === null ||
       current.isSymbolicLink() ||
       !current.isDirectory() ||
+      canonicalInfo.isSymbolicLink() ||
+      !canonicalInfo.isDirectory() ||
       !sameDirectoryIdentity(initial, current) ||
-      !sameCanonicalPath(canonical, resolved)
+      !sameDirectoryIdentity(initial, canonicalInfo)
     ) {
       throw new VaultaError('UNSAFE_PATH', message);
     }
-    return { dev: current.dev, ino: current.ino };
+    return { dev: current.dev, ino: current.ino, canonicalPath: canonical };
   }
 
   private async requireDirectVaultPackageDirectory(
